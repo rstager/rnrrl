@@ -1,30 +1,24 @@
-import gym
-import threading
-import numpy as np
-from collections import deque, namedtuple,defaultdict
+import os
 import random
 import time
-from queue import Queue
-from util import Counter
-from multiprocessing import Process,Pool,Queue
-import rnrlgym
-from keras.optimizers import Adam
-from keras.layers import Dense,Input,concatenate
-from keras.models import Model
-from keras.callbacks import Callback
-from keras.models import load_model,clone_model
-from keras import regularizers
-from util import kwargs
-from keras_util import DDPGof
-from matplotlib import pyplot as plt
-import os
-from collections import Iterable
-from movieplot import MoviePlot
+from collections import namedtuple
 
+import gym
+import numpy as np
+from keras import regularizers
+from keras.callbacks import Callback
+from keras.layers import Dense, Input, concatenate
+from keras.models import Model, clone_model, load_model
+from keras.optimizers import Adam
+from matplotlib import pyplot as plt
+from rnr.keras import DDPGof
+from rnr.movieplot import MoviePlot
+from rnr.util import kwargs
+import rnr.gym
 
 Experience = namedtuple('Experience', 'obs, action, reward, done')
 def run():
-    envname='NServoArm-v0'
+    envname='NServoArm-v1'
     nenvs=64
     nsteps=100000
     aepochs,cepochs,repochs=200,200,10000
@@ -36,7 +30,7 @@ def run():
     movie=MoviePlot({1:'RL'})
     for i,e in enumerate(envs):
         e.reset()
-    if reload and os.path.exists('memory.p'):
+    if True and os.path.exists('memory.p'):
         print("Load actor and data")
         actor = load_model('actor.h5')
         pretrain_memory = Rmemory.load('memory.p')
@@ -131,7 +125,7 @@ def batch_rollout(envs, policy=None, nsteps=1000, memory=None):
         memory=Rmemory()
     for i_env, e in enumerate(envs):
         bobs.append(e.reset())
-    for i_env in range(nsteps):
+    for i_step in range(nsteps):
         if policy is None:
             acts=[e.env.controller() for e in envs]
         else:
@@ -170,7 +164,8 @@ class Rmemory():
         self.episodes[md.episode]=bidx #update last entry in episode
         self.buffer.append(MemEntry(e, md))
         if e.done:
-            del self.envstate[i_env]
+            if i_env in self.envstate:
+                del self.envstate[i_env]
         else:
             self.envstate[i_env] = MetaData(i_env, md.episode, md.step + 1, bidx)
         return md
@@ -244,15 +239,24 @@ class Rmemory():
         a0=[]
         r0=[]
         obs1=[]
+        done=[]
         for r in self.buffer:
-            prev=r.metadata.prev
-            if prev != -1:
+            # because it is easier to keep a previous pointer,
+            # the last experience is sampled twice, the first is not sampled at all
+            if r.data.done: # if it is the end, use this sample
+                a0.append(r.data.action)
+                r0.append(r.data.reward)
+                obs0.append(r.data.obs)
+                obs1.append(np.zeros_like(r.data.obs))
+                done.append(r.data.done)
+            if r.metadata.prev != -1: #sample is first in episode
                 obs1.append(r.data.obs)
-                pr=self.buffer[prev]
+                pr=self.buffer[r.metadata.prev]
                 a0.append(pr.data.action)
                 r0.append(pr.data.reward)
                 obs0.append(pr.data.obs)
-        return np.array(obs0),np.array(a0),np.array(r0),np.array(obs1)
+                done.append(pr.data.done)
+        return np.array(obs0),np.array(a0),np.array(r0),np.array(obs1),np.array(done)
 
     def save(self,filename):
         import pickle
@@ -316,6 +320,9 @@ class pltq(Callback):
         self.gamma=gamma
         self.env=env
         self.actor=actor
+        self.ag1=AutoGrowAxes()
+        self.ag2=AutoGrowAxes()
+
 
     def on_epoch_end(self,epoch,logs):
         memory=rollout(self.env,self.actor)
@@ -330,10 +337,14 @@ class pltq(Callback):
         plt.clf()
         plt.suptitle(self.title)
         plt.subplot(2,1,1)
+        plt.xlim(0, self.env.spec.max_episode_steps)
+        plt.ylim(*self.ag1.lim(aq[:, 0]))
         plt.plot(aq[:, 0], label='discounted reward')
         plt.plot(q[:, 0], label='critic')
         plt.legend(loc=1, fontsize='xx-small')
         plt.subplot(2,1,2)
+        plt.xlim(0, self.env.spec.max_episode_steps)
+        plt.ylim(*self.ag2.lim(reward[:, 0]))
         plt.plot(reward[:, 0], label='reward')
         plt.plot(q[:-1, 0]-self.gamma*q[1:,0], label='critic delta')
         plt.legend(loc=1, fontsize='xx-small')
@@ -371,8 +382,10 @@ class plteval(Callback):
                 ar[i] += ar[i-1]
             plt.subplot(2, 1, 1)
             plt.plot(ar[:, 0], label=name)
+            plt.xlim(0,self.env.spec.max_episode_steps)
             plt.legend(loc=1,fontsize='xx-small')
             plt.subplot(2,1,2)
+            plt.xlim(0,self.env.spec.max_episode_steps)
             for i in range(act.shape[1]):
                 plt.plot(act[:, i], label=name)
             plt.legend(loc=1, fontsize='xx-small')
@@ -386,6 +399,10 @@ class plt3(Callback):
         self.series=series
         self.gamma=gamma
         self.env=env
+        self.ag1=AutoGrowAxes()
+        self.ag2=AutoGrowAxes()
+        self.ag3=AutoGrowAxes()
+
 
     def on_epoch_end(self,epoch,logs):
         plt.figure(self.fignum)
@@ -406,13 +423,19 @@ class plt3(Callback):
                 aq[i] += self.gamma * last
                 last = aq[i]
             plt.subplot(3,1,1)
+            plt.xlim(0,self.env.spec.max_episode_steps)
+            plt.ylim(*self.ag1.lim(ar[:, 0]))
             plt.plot(ar[:, 0], label=name)
             plt.legend(loc=1,fontsize='xx-small')
             plt.subplot(3,1,2)
+            plt.xlim(0,self.env.spec.max_episode_steps)
+            plt.ylim(*self.ag2.lim(reward[:, 0]))
             plt.plot(reward[:, 0], label=name+' reward')
             plt.plot(q[:-1, 0] - self.gamma * q[1:, 0], label=name+' q delta')
             plt.legend(loc=1,fontsize='xx-small')
             plt.subplot(3,1,3)
+            plt.xlim(0,self.env.spec.max_episode_steps)
+            plt.ylim(*self.ag3.lim(aq[:, 0]))
             plt.plot(aq[:, 0], label=name+' dfr')
             plt.plot(q[:, 0], label=name+' q')
             plt.legend(loc=1,fontsize='xx-small')
@@ -460,11 +483,12 @@ def actor_pretrain(envs,memory,actor,nsteps=1000,epochs=100,movie=None,fignum=1)
 
 
 def train_critic(critic, target_actor, target_critic, gamma, Rmem, callbacks):
-    obs0, a0, r0, obs1 = Rmem.obs1act()
+    obs0, a0, r0, obs1,done = Rmem.obs1act()
     q0 = target_critic.predict([obs0, a0])
     a1 = target_actor.predict([obs1])
     q1 = target_critic.predict([obs1, a1])
-    qt = np.expand_dims(r0, axis=-1) + gamma * q1
+    n=gamma*q1*np.expand_dims(np.logical_not(done), axis=-1)
+    qt = np.expand_dims(r0, axis=-1) + n
     history = critic.fit([obs0, a0], qt, shuffle=True, verbose=0, validation_split=0.1, epochs=1, callbacks=callbacks)
     return history
 
@@ -522,5 +546,21 @@ def rltraining(envs, memory, actor, critic, gamma, tau, epochs=100,movie=None,fi
         update_target(target_actor,actor,tau)
         update_target(target_critic,critic,tau)
     movie.finish()
+
+class AutoGrowAxes():
+    def __init__(self):
+        self.limits=None
+
+    def lim(self, data):
+        ulimit=np.max(data)*1.1
+        llimit=np.min(data)*1.1
+        if self.limits is None:
+            self.limits=(llimit,ulimit)
+        elif  llimit<self.limits[0] or ulimit>self.limits[1]:
+            self.limits=(min(self.limits[0], llimit), max(self.limits[1], ulimit))
+        b=(self.limits[1]-self.limit[0])*0.1
+        return self.limits[0]-b,self.limits[1]+b
+
+
 if __name__ == "__main__":
     run()
