@@ -17,27 +17,22 @@ from rnr.movieplot import MoviePlot
 from rnr.util import kwargs
 import rnr.gym
 
-saveit=plt.pause
-def pausewrapper(self,*args,**kwargs):
-    global saveit
-    print("before pause")
-    saveit(self,*args,**kwargs)
-    print("after pause")
-plt.pause=pausewrapper
 
 Experience = namedtuple('Experience', 'obs, action, reward, done')
 def run():
-    envname='Slider-v0'
+    envname='RestartablePendulum-v0'
     nenvs=64
-    nsteps=1000000
+    nsteps=100
     memsz=100000
-    aepochs,cepochs,repochs=200,10,10000
-    gamma=0.995
+    aepochs,cepochs,repochs=1,1,10000
+    gamma=0.99
     tau=0.001
     envs=[gym.make(envname) for i_env in range(nenvs)]
     reload=False
 
-    movie=MoviePlot({1:'RL'})
+    movie=MoviePlot("RL",path='experiments')
+    movie.grab_on_pause(plt)
+
     for i,e in enumerate(envs):
         e.reset()
 
@@ -58,7 +53,7 @@ def run():
         memory=Rmemory(sz=100000)
         if hasattr(envs[0],'controller'):
             print("pretrain actor using controller")
-            actor_pretrain(envs,memory,actor,movie=movie,fignum=1,epochs=aepochs)
+            actor_pretrain(envs,memory,actor,fignum=1,epochs=aepochs)
             actor.save('actor.h5')
         else:
             print("random policy rollout")
@@ -71,12 +66,12 @@ def run():
         print("load critic")
         critic = load_model('critic.h5')
     else:
-        pretrain_critic(envs,actor,critic,gamma,cepochs,memory,movie=movie,fignum=1)
+        pretrain_critic(envs,actor,critic,gamma,cepochs,memory,fignum=1)
         print("Saving critic")
         critic.save('critic.h5')
 
 
-    rltraining(envs, memory, actor, critic, gamma, tau, epochs=repochs,movie=movie,fignum=1,visualize=True)
+    rltraining(envs, memory, actor, critic, gamma, tau, epochs=repochs,fignum=1,visualize=True)
     movie.finish()
 
 def make_models(env):
@@ -398,14 +393,6 @@ class pltq(Callback):
         plt.plot(q[:-1, 0]-self.gamma*q[1:,0], label='critic delta')
         plt.legend(loc=1, fontsize='xx-small')
         plt.pause(0.1)
-class MovieSnap(Callback):
-    def __init__(self,movie):
-        super(MovieSnap,self).__init__()
-        self.movie=movie
-    def on_epoch_end(self, epoch, logs):
-        if self.movie:
-            self.movie.grab_frames()
-
 
 
 class plteval(Callback):
@@ -418,8 +405,6 @@ class plteval(Callback):
         self.ag1=AutoGrowAxes()
         self.ag2=AutoGrowAxes()
         self.skip=skip
-
-
 
     def on_epoch_end(self,epoch,logs):
         self.epoch+=1
@@ -449,35 +434,32 @@ class plteval(Callback):
         self.env.env.locked = False
         plt.pause(0.1)
 
-class pltqmap(Callback):
-    def __init__(self,env,gamma,series,title="",fignum=None):
+class pltmap(Callback):
+    def __init__(self,env,func,title="",fignum=None,gsz=25):
         self.title=title
         self.fignum=plt.figure(fignum).number
-        self.series=series
-        self.gamma=gamma
+        self.func=func
         self.env=env
         self.ag1=AutoGrowAxes()
-        self.ag2=AutoGrowAxes()
-        self.ag3=AutoGrowAxes()
-        self.epoch=0
+        self.gsz=100
+        self.extent=(env.observation_space.low[0],env.observation_space.high[0],
+                     env.observation_space.low[1], env.observation_space.high[1])
 
-    def plot(self,obs0):
-        fig = plt.figure(4)
-        ax = plt.gca()
+
+    def on_epoch_end(self,epoch,logs):
+        X, Y = np.meshgrid(np.linspace(self.extent[0],self.extent[1], self.gsz),
+                           np.linspace(self.extent[2], self.extent[3], self.gsz))
+        A=self.func([np.vstack([X.flatten(),Y.flatten()]).T])
+        A=A[0].reshape((self.gsz,self.gsz))
+        fig = plt.figure(self.fignum)
         plt.clf()
-        fig.suptitle("Actions for obs{}, Episode {}".format(Config.viz_idx,i_episode))
-        plt.axis(extent)
-        sp = (1,nadim)
-        for i in range(nadim):
-            plt.subplot(*sp, i + 1)
-            avmax = env.action_space.high[i]
-            avmin = env.action_space.low[i]
-            im = plt.imshow(A[:, :, i], cmap=plt.cm.RdBu_r, vmin=avmin, vmax=avmax, extent=extent)
-            im.set_interpolation('bilinear')
-            plt.scatter(x=-replay_buffer.obs[episodes[-1], 1], y=replay_buffer.obs[episodes[-1], 0], c='k',
-                                vmin=avmin, vmax=avmax, s=0.5)
-            plt.scatter(x=-replay_buffer.obs[episodes[-1][-1], 1], y=replay_buffer.obs[episodes[-1][-1], 0], c='green', s=6)
-            cb = fig.colorbar(im)
+        fig.suptitle(self.title.format(**{"epoch":epoch}))
+        plt.axis(self.extent)
+        avmin,avmax=self.ag1.lim(A)
+        im = plt.imshow(A, cmap=plt.cm.RdBu_r, vmin=avmin, vmax=avmax, extent=self.extent,origin='lower')
+        im.set_interpolation('bilinear')
+        cb = fig.colorbar(im)
+        plt.pause(0.1)
 
 class plt3(Callback):
     def __init__(self,env,gamma,series,title="",fignum=None):
@@ -536,7 +518,7 @@ class plt3(Callback):
         self.env.env.locked=False
         plt.pause(0.1)
 
-def actor_pretrain(envs,memory,actor,nsteps=1000,epochs=100,movie=None,fignum=1):
+def actor_pretrain(envs,memory,actor,nsteps=1000,epochs=100,fignum=1):
     envname=envs[0].env.spec.id
     actor.compile(optimizer=Adam(lr=0.01, decay=1e-3), loss='mse', metrics=['mae', 'acc'])
 
@@ -568,10 +550,10 @@ def actor_pretrain(envs,memory,actor,nsteps=1000,epochs=100,movie=None,fignum=1)
     end=time.perf_counter()
     print("prepare {} {}".format(envname,end-start))
 
-    ms=MovieSnap(movie)
+
     p1=plteval(envs[0], [("ctrl",None),('pretrained',actor)], title="Pretrain actor",fignum=fignum) # critic q vs actual dfr)# I want to compare controller roll out vs current policy rollout
     start = time.perf_counter()
-    history = actor.fit(obs0, a0, shuffle=True, verbose=0, validation_split=0.1, epochs=epochs,callbacks=[p1,ms])
+    history = actor.fit(obs0, a0, shuffle=True, verbose=0, validation_split=0.1, epochs=epochs,callbacks=[p1])
     end = time.perf_counter()
     print("Train actor {} {} epochs {}".format(envname,end-start,epochs))
 
@@ -594,69 +576,82 @@ def create_target(model):
     return target_model
 
 def update_target(target, model, tau):
-    target.set_weights([tau * w + (1 - tau) * wp for wp, w in zip(target.get_weights(), model.get_weights())])
+    target.set_weights([tau * w + (1 - tau) * wp for wp, w in zip(model.get_weights(), target.get_weights())])
 
 def train_ddpg_actor(actor, memory, callbacks):
     obs0, a0 = memory.obsact()
     actor.fit(obs0, np.zeros_like(a0), shuffle=True, verbose=2, validation_split=0.1, epochs=1, callbacks=callbacks)
 
-def pretrain_critic(envs, actor, critic, gamma, cepochs, memory,movie=None,fignum=None):
+def pretrain_critic(envs, actor, critic, gamma, cepochs, memory,fignum=None):
     envname=envs[0].env.spec.id
     critic.compile(optimizer=Adam(lr=0.01, decay=1e-3), loss='mse', metrics=['mae', 'acc'])
     p1=pltq(envs[0],actor,critic,gamma,title="pretrain critic",fignum=fignum) # critic q vs actual dfr
-    ms=MovieSnap(movie)
     for i in range(cepochs):
         start = time.perf_counter()
-        history=train_critic(critic, actor, critic, gamma, memory, [p1,ms])
+        history=train_critic(critic, actor, critic, gamma, memory, [p1])
         end = time.perf_counter()
         print("Train critic {} {} epochs {}/{}".format(envname,end-start,i,cepochs))
 
 
 
-def rltraining(envs, memory, actor, critic, gamma, tau, epochs=100,movie=None,fignum=None,visualize=False):
+def rltraining(envs, memory, actor, critic, gamma, tau, epochs=100,fignum=None,visualize=False):
     envname=envs[0].env.spec.id
-    mode=2
+    bsz=32
+    mode=1
+    actor.compile(optimizer=Adam(lr=0.001, clipnorm=1.,decay=1e-6), loss='mse', metrics=['mae', 'acc'])
+
     if mode==1:
-        actor.compile(optimizer=DDPGof(Adam)(critic, actor, lr=0.0000001), loss='mse', metrics=['mae', 'acc'])
+        actor.compile(optimizer=DDPGof(Adam)(critic, actor, batch_size=bsz, lr=0.001, clipnorm=1.,decay=1e-6),
+                      loss='mse', metrics=['mae', 'acc'])
     else:
         cgrad = K.gradients(critic.outputs, critic.inputs[1])  # grad of Q wrt actions
-        fgrad = K.function(critic.inputs, cgrad)
-        actor.compile(optimizer=Adam(lr=0.001), loss='mse', metrics=['mae', 'acc'])
+        cgradf = K.function(critic.inputs, cgrad)
+        actor.compile(optimizer=Adam(lr=0.001, clipnorm=1.,decay=1e-6), loss='mse', metrics=['mae', 'acc'])
 
-    critic.compile(optimizer=Adam(lr=0.0001, decay=1e-3), loss='mse', metrics=['mae', 'acc'])
+    critic.compile(optimizer=Adam(lr=0.001, clipnorm=1.,decay=1e-6), loss='mse', metrics=['mae', 'acc'])
     pretrained_actor=create_target(actor)
     pretrained_critic=create_target(critic)
     target_actor=create_target(actor)
     target_critic=create_target(critic)
 
+    combined=critic([actor.inputs[0],actor.outputs[0]])
+    combinedf=K.function([actor.inputs[0]],[combined])
+    actorf=K.function([actor.inputs[0]],[actor.outputs[0]])
+
+    combinedgrad=K.gradients(combined, actor.outputs[0])
+    combinedgradf=K.function([actor.inputs[0]],combinedgrad)
+
     # Each environment requires an explorer instance
-    explorers = [ OrnstienUhlenbeckExplorer(e.action_space, theta=.5, mu=0., dt=1.0, ) for e in envs]
 
-    p3=plt3(envs[0], gamma, [("ctrl",None,pretrained_critic),
-                             ('target',target_actor,target_critic),('ddpg',actor,critic)], title="RL eval",fignum=fignum)
+    explorers = [ OrnstienUhlenbeckExplorer(e.action_space, theta = .15, mu = 0.,nfrac=0.03 ) for e in envs]
 
-    ms=MovieSnap(movie)
-
+    callbacks=[]
+    callbacks.append(plt3(envs[0], gamma, [("ctrl",None,pretrained_critic),
+                             ('target',target_actor,target_critic),('ddpg',actor,critic)], title="RL eval",fignum=fignum))
+    if hasattr(envs[0].observation_space,'shape') and envs[0].observation_space.shape[0]==2:
+        callbacks.append(pltmap(envs[0],combinedf,title="combined q(o,a(o)) {epoch}",fignum=2))
+        callbacks.append(pltmap(envs[0],actorf,title="actor a(o)) {epoch}",fignum=3))
+        callbacks.append(pltmap(envs[0],combinedgradf,title="combined grad wrt a(o)) {epoch}",fignum=4))
     for i in range(epochs):
         astart = time.perf_counter()
         lr=K.get_value(critic.optimizer.lr)
         print("critic lr={}".format(lr))
         #K.set_value(actor.optimizer.lr,lr*0.99)
-        chistory=train_critic(critic, target_actor, target_critic, gamma, memory, [p3,ms])
+        chistory=train_critic(critic, target_actor, target_critic, gamma, memory, callbacks)
         aend = time.perf_counter()
 
         start = time.perf_counter()
         obs0, a0 = memory.obsact()
         if mode==1:
             actor.fit(obs0, np.zeros_like(a0), shuffle=True, verbose=2, validation_split=0.1, epochs=1,
-                      callbacks=[p3])
+                      callbacks=callbacks,batch_size=bsz)
         else:
             # update the actor : critic.grad()*actor.grad()
             actions = actor.predict(obs0)
-            grads = fgrad([obs0, actions])[0]
+            grads = cgradf([obs0, actions])[0]
             ya = actions + 0.1 * grads  # nudge action in direction that improves Q
-            actor.fit(obs0, np.zeros_like(a0), shuffle=True, verbose=2, validation_split=0.1, epochs=1,
-                      callbacks=[p3])
+            actor.fit(obs0, ya, shuffle=True, verbose=2, validation_split=0.1, epochs=1,
+                      callbacks=callbacks)
 
         end = time.perf_counter()
         print("RL Train {} {:0.3f},{:0.3f}  epochs {} of {}".format(envname, end - start, aend-astart, i, epochs))
@@ -670,16 +665,20 @@ def rltraining(envs, memory, actor, critic, gamma, tau, epochs=100,movie=None,fi
 
 
 class AutoGrowAxes():
-    def __init__(self):
+    def __init__(self,decay=0.01):
         self.limits=None
+        self.decay=decay
 
     def lim(self, data):
-        ulimit=np.max(data)*1.1
-        llimit=np.min(data)*1.1
+        ulimit=np.max(data)
+        llimit=np.min(data)
         if self.limits is None:
-            self.limits=(llimit,ulimit)
+            self.limits=[llimit,ulimit]
         elif  llimit<self.limits[0] or ulimit>self.limits[1]:
-            self.limits=(min(self.limits[0], llimit), max(self.limits[1], ulimit))
+            self.limits=[min(self.limits[0], llimit), max(self.limits[1], ulimit)]
+        if self.decay != 0.0:
+            self.limits = (self.limits[0]*(1-self.decay),self.limits[1]*(1-self.decay))
+
         b=(self.limits[1]-self.limits[0])*0.1
         return self.limits[0]-b,self.limits[1]+b
 
