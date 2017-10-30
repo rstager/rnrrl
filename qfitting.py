@@ -12,24 +12,19 @@ import copy
 from plotutils import plotdist
 
 import matplotlib.pyplot as plt
+from rl import discounted_future,TD_q
 
-
-
-def TD_q(target_actor, target_critic, gamma, obs1, r0, done):
-    assert obs1.shape[0]==r0.shape[0],"Observation and reward sizes must match"
-    assert r0.shape[-1]==1 and done.shape[-1]==1,"Reward and done have shape [None,1]"
-    a1 = target_actor.predict([obs1])
-    q1 = target_critic.predict([obs1, a1])
-    qt = r0 + np.select([np.logical_not(done)], [gamma * np.array(q1)], 0)
-    return qt
-
-def discounted_future(reward, gamma):
-    df = np.copy(reward)
-    last = 0
-    for i in reversed(range(df.shape[0])):
-        df[i] += gamma * last
-        last = df[i]
-    return df
+def oversample(al,count,length):
+    xl = []
+    for a in al:
+        xl.append([a])
+    for x, z in zip(xl, al):
+        for n in range(count):
+            x.append(a[-length:])
+    ret = []
+    for x in xl:
+        ret.append(np.vstack(x))
+    return ret
 
 gamma=0.995
 nsteps=500
@@ -86,7 +81,8 @@ def experiment(layer_args, shape, activation_args={}, title="", rname=None,
     dfr = discounted_future(r0, gamma)
     for epoch in range(nepochs):
         tdq = TD_q(actor, critic, gamma, obs1, r0, done)
-        critic.train_on_batch([obs0, a0], tdq)
+        obs0x,a0x,tdqx=oversample([obs0,a0,tdq],count=1,length=1)
+        critic.train_on_batch([obs0x, a0x], tdqx)
         #critic.fit([obs0,a0],tdq,shuffle=True,verbose=0) # trains much slower
         metrics=critic.test_on_batch([obs0, a0],dfr)
         loss.append(metrics[0]) #print(critic.metrics_names,metrics[0])
@@ -140,19 +136,20 @@ def run():
     next=nextone()
     for i in range(100):
         if i==0:
-            shape = [128,128] #
+            shape = [32,32,128] #
             reg=1e-5
             common_args = {
-                'activation':random.choice(['LeakyReLU']),
+                'activation':'relu',
                 'kernel_regularizer':l2(reg),
                 'kernel_initializer':'glorot_normal',
             }
             rname='sparse'
-            lr=0.001
+            lr=0.01
             decay=1e-3
             rname = '-d**2'
         elif i==1:
-            shape = [32,32,128] #
+            common_args['activation']='LeakyReLU'
+            shape = [32,32,128]  #
         elif i==2:
             lr=0.001
             decay=1e-4
@@ -175,7 +172,7 @@ def run():
 
         label="{} {} lr:{}/{} reg:{} {} ".format(rname,shape,lr,decay,reg,str(common_args['activation']))
         r=suite(10, layer_args=common_args, shape=shape, title=label, rname=rname,
-                lr=lr,visualization=None,decay=decay,nepochs=1000)
+                lr=lr,visualization=True,decay=decay,nepochs=500)
         plt.figure(3)
         plt.title("log mse distribution")
         plotdist(plt, np.array(r), axis=0,semilog=True,label=label)
