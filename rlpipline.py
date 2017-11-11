@@ -14,7 +14,7 @@ from rnr.movieplot import MoviePlot
 from rnr.util import kwargs
 
 
-def run(cluster, gamma=0.995, tau=0.001, prefill=10000, aepochs=0, cepochs=0, repochs=1000):
+def run(cluster, gamma=0.995, tau=0.001, prefill=10000, aepochs=0, cepochs=0, repochs=1000,lr=0.01,clr=0.01,decay=1e-4):
 
     reload=False
     xdir='experiments/latest'
@@ -43,7 +43,7 @@ def run(cluster, gamma=0.995, tau=0.001, prefill=10000, aepochs=0, cepochs=0, re
         print("Save memory")
         memory.save(os.path.join(xdir,'memory.p'))
 
-    agent=DDPGAgent(cluster,actor,critic,tau,gamma,mode=2,lr=0.01,decay=1e-4)
+    agent=DDPGAgent(cluster,actor,critic,tau,gamma,mode=2,lr=lr,clr=clr,decay=decay)
     eval=ActorCriticEval(cluster,agent.target_actor,agent.target_critic,gamma)
     callbacks=[]
     callbacks.append(eval)
