@@ -1,45 +1,55 @@
 from collections import namedtuple
 import random
 import numpy as np
+import gym
 
+from rnr.segment_tree import SumSegmentTree
 
 Experience = namedtuple('Experience', 'obs, action, reward, done')
 MemEntry=namedtuple('MemEntry','data,metadata')
 MetaData=namedtuple('MetaData','episode,step,prev')
 class ExperienceMemory():
+    class Recorder:
+        def __init__(self, memory,episodic=True):
+            self.memory = memory
+            self.md = None
+            self.episodic=episodic
+
+        def record(self, experience):
+            self.md = self.memory._record(experience, self.md,self.episodic)
+
+        def reset(self):
+            self.md = None
 
     def __init__(self,sz=10000):
         self.sz=sz
-        self.didx=0
+        self.didx=-1
         self.buffer=[]
         self.i_episode=0
         self._episodes=[]
 
-    def recorder(self):
-        class Recorder:
-            def __init__(self,memory):
-                self.memory=memory
-                self.md=None
-            def record(self,experience):
-                self.md=self.memory._record(experience,self.md)
-            def reset(self):
-                self.md=None
-        return Recorder(self)
+    def recorder(self,episodic=True):
+        return ExperienceMemory.Recorder(self,episodic)
 
-    def _record(self, experience, md):
-        if md is None:
-            md= MetaData(self.i_episode, 0, -1) #env,episode,step,prev
-            self._episodes.append(self.didx)
-            self.i_episode+=1
-        self._episodes[md.episode]=self.didx #update last entry in episode
+    def _record(self, experience, md,episodic=True):
+        self.didx += 1
+        if self.didx >= self.sz:
+            self.didx = 0
+        if episodic:
+            if md is None:
+                md= MetaData(self.i_episode, 0, -1) #episode,step,prev
+                self._episodes.append(self.didx)
+                self.i_episode+=1
+            self._episodes[md.episode]=self.didx #update last entry in episode
+        else:
+            if md is None:
+                md = MetaData(-1, 0, -1)  # episode,step,prev
         if self.didx==len(self.buffer):
             self.buffer.append(MemEntry(experience, md))
         else:
             self.buffer[self.didx]=MemEntry(experience, md)
         md = MetaData(md.episode, md.step + 1, self.didx) if not experience.done else None
-        self.didx += 1
-        if self.didx >= self.sz:
-            self.didx = 0
+
         return md
 
     def episodes(self):
@@ -76,9 +86,17 @@ class ExperienceMemory():
         return Sobs,Saction,Sreward,Sdone
 
 
-    def obs1generator(self,batch_size=32):
+    def obs1generator(self,batch_size=32,oversample_done=None):
+        assert len(self.buffer) > 0
         while True:
-            idxs=np.random.choice(len(self.buffer),size=batch_size)
+            if oversample_done is None:
+                idxs=np.random.choice(len(self.buffer),size=batch_size)
+            else:
+                p = np.array([r.data.done * oversample_done + 1 for r in self.buffer])
+                p = p/np.sum(p)
+                idxs=np.random.choice(p.shape[0],size=batch_size,p=p)
+
+            #idxs=np.random.choice(len(self.buffer),size=batch_size)
             obs0 = []
             obs1 = []
             a0=[]
@@ -147,6 +165,45 @@ class ExperienceMemory():
         import pickle
         return pickle.load( open(filename, "rb"))
 
+class PrioritizedMemory(ExperienceMemory):
+    def __init__(self,sz=10000):
+        super().__init(self,sz)
+        self._it_sum=SumSegmentTree()
+
+    class Recorder(ExperienceMemory.Recorder):
+        def __init__(self, memory):
+            super().__init__(self,memory)
+
+        def record(self, experience,priority=0):
+            idx=super().record(experience, self.md)
+            self.memory._it_sum[idx] = priority
+
+    def recorder(self):
+        return PrioritizedMemory.Recorder(self)
+
+    def sample_episode(self, episode_idx=None):
+        pass
+
+    def sample(self):
+        pass
+
+    def append(self, *args, **kwargs):
+        """See ReplayBuffer.store_effect"""
+        idx=super().append(*args,**kwargs)
+        self._it_sum[idx] = self._max_priority ** self._alpha
+        self._it_min[idx] = self._max_priority ** self._alpha
+
+    def _sample_proportional(self, batch_size):
+        res = []
+        for _ in range(batch_size):
+            # TODO(szymon): should we ensure no repeats?
+            mass = random.random() * self._it_sum.sum(0, self.nb_entries - 1)
+            idx = self._it_sum.find_prefixsum_idx(mass)
+            res.append(idx)
+        return res
+
+
+
 def discounted_future(reward,gamma):
         df=np.copy(reward)
         last = 0
@@ -161,6 +218,62 @@ def TD_q(target_actor, target_critic, gamma, obs1, r0, done):
     a1 = target_actor.predict([obs1])
     q1 = target_critic.predict([obs1, a1])
     n=np.select([np.logical_not(done)], [gamma * np.array(q1)], 0)
+    #
+    # print("n mean={}".format(np.mean(n)))
     qt = r0 + n
     # print("TD_q obs1 {} r0 {} done {} n {} qt {}".format(obs1.shape,r0.shape,done.shape,n.shape,qt.shape))
     return qt
+
+# collection of environments for efficient rollout
+class EnvRollout:
+    def __init__(self,envname,nenv=16):
+        self.envname=envname
+        self._instances=[gym.make(envname) for x in range(nenv)]
+        self.env = self._instances[0]
+        self.nenv=nenv
+
+    def rollout(self, policy, memory=None,exploration=None,visualize=False,nepisodes=None,nsteps=None,state=None):
+        bobs = []
+        recorders=[]
+        step_cnt,episode_cnt=0,0
+
+        if memory is None:
+            memory=ExperienceMemory()
+        n= nepisodes if nepisodes is not None and nepisodes<len(self._instances) else len(self._instances)
+        for env in self._instances[:n]:
+            tobs = env.reset()
+            if state is not None:
+                tobs = env.env.set_state(state)
+            bobs.append(tobs)
+            recorders.append(memory.recorder())
+
+        while (nepisodes is not None and episode_cnt<nepisodes) or (nsteps is not None and step_cnt<nsteps):
+            if policy is None:
+                acts=[e.env.controller() for e in self._instances]
+            else:
+                acts = policy.predict(np.array(bobs))
+
+            if exploration is not None:
+                noises=[e.sample(a) for e,a in zip(exploration,acts)]
+            else:
+                noises=[None]*len(self._instances)
+
+            for i_env, (action, env,recorder,noise) in enumerate(zip(acts, self._instances,recorders, noises)):
+                tobs,reward,done,_=env.step(action)
+                if visualize and i_env==0:
+                    env.render()
+                if noise is not None:
+                    action += noise
+                recorder.record(Experience(bobs[i_env], action, reward, done))
+                if done:
+                    tobs=env.reset()
+                    if state is not None:
+                        tobs=env.env.set_state(state)
+                    if exploration is not None:
+                        exploration[i_env].reset()
+                    episode_cnt+=1
+                bobs[i_env]=tobs
+                step_cnt+=1
+                if nsteps is not None and step_cnt>=nsteps:
+                    break
+        return memory
