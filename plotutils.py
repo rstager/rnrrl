@@ -19,9 +19,25 @@ class AutoGrowAxes():
         b=(self.limits[1]-self.limits[0])*0.1
         return self.limits[0]-b,self.limits[1]+b
 
+def plotdistdict(plt, dists, axis=1, semilog=False):
+    '''
+    Plot a set of distributions from a dictionary
+    '''
+    n = len(dists)
+    for idx, (name,series) in enumerate(dists.items()):
+        plt.subplot(n, 1, idx + 1)
+        plotdist(plt, series, label=name,axis=axis,semilog=semilog)
+        plt.axhline(0, color='black')
+        plt.legend(loc=1, fontsize='xx-small')
 
 
 def plotdist(plt, rs,axis=1,label="",semilog=False):
+    '''
+    plot the distribution of a series of sequences
+    axis is the dimension on which the distribution is computed
+    the other dimension is the x value in the plot
+    ie. rs is of the form rs[time,series]=value
+    '''
     if isinstance(rs,list):  # support for variable length rows
         m,s=[],[]
         for row in rs:
