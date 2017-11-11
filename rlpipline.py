@@ -5,7 +5,7 @@ import keras.backend as K
 import numpy as np
 from keras import regularizers
 from keras.callbacks import Callback
-from keras.layers import Dense, Input, concatenate
+from keras.layers import Dense, Input, concatenate, BatchNormalization
 from keras.models import Model, load_model
 from keras.optimizers import Adam
 from matplotlib import pyplot as plt
@@ -17,58 +17,57 @@ from rlagents import DDPGAgent
 from rnr.keras import OrnstienUhlenbeckExplorer
 from rnr.movieplot import MoviePlot
 from rnr.util import kwargs
+from rnr.gym import rnrenvs
 
 
 def run(cluster, gamma=0.995, tau=0.001, prefill=10000, aepochs=0, cepochs=0, repochs=1000):
 
     reload=False
+    xdir='experiments/latest'
 
-    movie=MoviePlot("RL",path='experiments/latest')
+    movie=MoviePlot("RL",path=xdir)
     movie.grab_on_pause(plt)
 
     actor,critic = make_models(cluster.env)
 
-    if reload and os.path.exists('actor.h5'):
+    if reload and os.path.exists(os.path.join(xdir,'actor.h5')):
         print("Load actor")
-        actor = load_model('actor.h5')
+        actor = load_model(os.path.join(xdir,'actor.h5'))
 
-    if reload and os.path.exists('critic.h5'):
+    if reload and os.path.exists(os.path.join(xdir,'critic.h5')):
         print("load critic")
-        critic = load_model('critic.h5')
+        critic = load_model(os.path.join(xdir,'critic.h5'))
 
-    if reload and os.path.exists('memory.p'):
+    if reload and os.path.exists(os.path.join(xdir,'memory.p')):
         print("Load data")
-        memory = ExperienceMemory.load('memory.p')
+        memory = ExperienceMemory.load(os.path.join(xdir,'memory.p'))
     else:
         memory=ExperienceMemory(sz=1000000)
         if hasattr(cluster._instances[0], 'controller'):
             print("pretrain actor using controller")
             actor_pretrain(cluster,memory,actor,fignum=1,epochs=aepochs)
-            actor.save('actor.h5')
+            actor.save(os.path.join(xdir,'actor.h5'))
         else:
             print("random policy envs")
             explorers = [OrnstienUhlenbeckExplorer(cluster.env.action_space, theta=.5, mu=0., dt=1.0, ) for i in range(cluster.nenv)]
             cluster.rollout(actor, nsteps=prefill, memory=memory, exploration=explorers, visualize=False)
         print("Save memory")
-        memory.save('memory.p')
+        memory.save(os.path.join(xdir,'memory.p'))
 
     if reload and os.path.exists('critic.h5'):
         print("load critic")
-        critic = load_model('critic.h5')
+        critic = load_model(os.path.join(xdir,'critic.h5'))
     else:
         pretrain_critic(cluster,actor,critic,gamma,cepochs,memory,fignum=1)
         print("Saving critic")
-        critic.save('critic.h5')
-    agent=DDPGAgent(cluster,actor,critic,tau,gamma,mode=1,lr=0.01,decay=1e-4)
+        critic.save(os.path.join(xdir,'critic.h5'))
+    agent=DDPGAgent(cluster,actor,critic,tau,gamma,mode=2,lr=0.01,decay=1e-4)
     eval=ActorCriticEval(cluster,agent.target_actor,agent.target_critic,gamma)
     callbacks=[]
     callbacks.append(eval)
     callbacks.append(PltQEval(cluster, gamma, [('target', agent.target_actor, agent.target_critic),
-                                               ('ddpg', agent.actor, agent.critic)], title="RL eval",
-                              fignum=1))
+                                               ('ddpg', agent.actor, agent.critic)], title="RL eval",fignum=1))
     callbacks.append(PlotDist(cluster, eval.hist, title="actor/critic training trends"))
-    if False and hasattr(cluster.env.observation_space, 'shape') and cluster.env.observation_space.shape[0] == 2:
-        callbacks.append(PltMaps(cluster, agent))
 
     agent.train(memory, epochs=repochs, fignum=1, visualize=False,callbacks=callbacks)
     movie.finish()
@@ -83,14 +82,8 @@ def make_models(env):
                          # bias_initializer=Constant(value=0.1),
                          )
     x = oin
-    #x = BatchNormalization()(x)
-    #x = Dense(128, **common_args)(x)
-    #x = Dense(128, **common_args)(x)
-    #x = Dense(128, **common_args)(x)
     x = Dense(64, **common_args)(x)
-    #x = Dense(32, **common_args)(x)
-    #x = Dense(32, **common_args)(x)
-    #x = Dense(32, **common_args)(x)
+    x = BatchNormalization()(x)
     x = Dense(32, **common_args)(x)
     x = Dense(env.action_space.shape[0], activation='linear')(x)
     actor = Model(oin, x, name='actor')
@@ -100,9 +93,9 @@ def make_models(env):
                         kernel_regularizer=regularizers.l2(1e-6),
                         )
     x = oin
-    #x = BatchNormalization()(x)
     x = concatenate([x, ain], name='sensor_goal_action')
     x = Dense(32, **common_args)(x)
+    #x = BatchNormalization()(x)
     x = Dense(128, **common_args)(x)
     x = Dense(1, activation='linear', name='Q')(x)
     critic = Model([oin, ain], x, name='critic')
@@ -367,6 +360,7 @@ def pretrain_critic(cluster, actor, critic, gamma, cepochs, memory,fignum=None):
 
 
 if __name__ == "__main__":
+    rnrenvs()
     # envname='Slider-v0'
     envname = 'Pendulum-v100'
     # envname = 'PendulumHER-v100'
