@@ -1,35 +1,26 @@
 import os
-import random
 import time
 
-
-import gym
+import keras.backend as K
 import numpy as np
 from keras import regularizers
 from keras.callbacks import Callback
 from keras.layers import Dense, Input, concatenate
-from keras.models import Model, clone_model, load_model
+from keras.models import Model, load_model
 from keras.optimizers import Adam
-import keras.backend as K
 from matplotlib import pyplot as plt
-from rnr.keras import DDPGof,OrnstienUhlenbeckExplorer
-from rnr.movieplot import MoviePlot
-from rnr.util import kwargs, rms, reduce
-import rnr.gym
-from plotutils import AutoGrowAxes,plotdist
-from rl import Experience,ExperienceMemory,discounted_future,TD_q
 
-def run():
-    #envname='Slider-v0'
-    #envname='Pendulum-v100'
-    envname='NServoArm-v6'
-    #envname='ContinuousMountainCart-v100'
-    nenvs=64
-    memsz=100000
-    aepochs,cepochs,repochs=0,0,10000
-    gamma=0.99
-    tau=0.001
-    cluster=EnvRollout(envname,nenvs)
+from callbacks import ActorCriticEval, PlotDist
+from plotutils import AutoGrowAxes
+from rl import EnvRollout, ExperienceMemory, TD_q
+from rlagents import DDPGAgent
+from rnr.keras import OrnstienUhlenbeckExplorer
+from rnr.movieplot import MoviePlot
+from rnr.util import kwargs
+
+
+def run(cluster, gamma=0.995, tau=0.001, prefill=10000, aepochs=0, cepochs=0, repochs=1000):
+
     reload=False
 
     movie=MoviePlot("RL",path='experiments/latest')
@@ -49,7 +40,7 @@ def run():
         print("Load data")
         memory = ExperienceMemory.load('memory.p')
     else:
-        memory=ExperienceMemory(sz=100000)
+        memory=ExperienceMemory(sz=1000000)
         if hasattr(cluster._instances[0], 'controller'):
             print("pretrain actor using controller")
             actor_pretrain(cluster,memory,actor,fignum=1,epochs=aepochs)
@@ -57,7 +48,7 @@ def run():
         else:
             print("random policy envs")
             explorers = [OrnstienUhlenbeckExplorer(cluster.env.action_space, theta=.5, mu=0., dt=1.0, ) for i in range(cluster.nenv)]
-            cluster.rollout(actor,nsteps=memsz,memory=memory,exploration=explorers,visualize=False)
+            cluster.rollout(actor, nsteps=prefill, memory=memory, exploration=explorers, visualize=False)
         print("Save memory")
         memory.save('memory.p')
 
@@ -68,16 +59,18 @@ def run():
         pretrain_critic(cluster,actor,critic,gamma,cepochs,memory,fignum=1)
         print("Saving critic")
         critic.save('critic.h5')
-    agent=DDPGAgent(cluster,actor,critic,tau,gamma,mode=2)
+    agent=DDPGAgent(cluster,actor,critic,tau,gamma,mode=1,lr=0.01,decay=1e-4)
+    eval=ActorCriticEval(cluster,agent.target_actor,agent.target_critic,gamma)
     callbacks=[]
-    callbacks.append(plt3(cluster, gamma, [('target', agent.target_actor, agent.target_critic),
-                                            ('ddpg', agent.actor, agent.critic)], title="RL eval",
+    callbacks.append(eval)
+    callbacks.append(PltQEval(cluster, gamma, [('target', agent.target_actor, agent.target_critic),
+                                               ('ddpg', agent.actor, agent.critic)], title="RL eval",
                               fignum=1))
-    callbacks.append(plttrends(cluster,agent.hist,title="actor/critic training trends"))
+    callbacks.append(PlotDist(cluster, eval.hist, title="actor/critic training trends"))
     if False and hasattr(cluster.env.observation_space, 'shape') and cluster.env.observation_space.shape[0] == 2:
-        callbacks.append(pltmaps(cluster,agent))
+        callbacks.append(PltMaps(cluster, agent))
 
-    agent.train(memory, epochs=repochs, fignum=1, visualize=True,callbacks=callbacks)
+    agent.train(memory, epochs=repochs, fignum=1, visualize=False,callbacks=callbacks)
     movie.finish()
 
 def make_models(env):
@@ -86,10 +79,11 @@ def make_models(env):
     oin = Input(shape=env.observation_space.shape, name='observeration')  # full observation
     common_args = kwargs(kernel_initializer='glorot_normal',
                          activation='relu',
-                         kernel_regularizer=regularizers.l2(1e-8)
+                         kernel_regularizer=regularizers.l2(1e-5)
                          # bias_initializer=Constant(value=0.1),
                          )
     x = oin
+    #x = BatchNormalization()(x)
     #x = Dense(128, **common_args)(x)
     #x = Dense(128, **common_args)(x)
     #x = Dense(128, **common_args)(x)
@@ -105,82 +99,17 @@ def make_models(env):
                         kernel_initializer='glorot_normal',
                         kernel_regularizer=regularizers.l2(1e-6),
                         )
-    x = concatenate([oin, ain], name='sensor_goal_action')
+    x = oin
+    #x = BatchNormalization()(x)
+    x = concatenate([x, ain], name='sensor_goal_action')
+    x = Dense(32, **common_args)(x)
     x = Dense(128, **common_args)(x)
-    x = Dense(64, **common_args)(x)
-    x = Dense(32, **common_args)(x)
-    x = Dense(32, **common_args)(x)
     x = Dense(1, activation='linear', name='Q')(x)
     critic = Model([oin, ain], x, name='critic')
     return actor,critic
 
-# collection of environments for efficient rollout
-class EnvRollout:
-    def __init__(self,envname,nenv=16):
-        self.envname=envname
-        self._instances=[gym.make(envname) for x in range(nenv)]
-        self.env = self._instances[0]
-        self.nenv=nenv
 
-    def rollout(self, policy, memory=None,exploration=None,visualize=False,nepisodes=None,nsteps=None,state=None):
-        bobs = []
-        recorders=[]
-        step_cnt,episode_cnt=0,0
 
-        if memory is None:
-            memory=ExperienceMemory()
-        n= nepisodes if nepisodes is not None and nepisodes<len(self._instances) else len(self._instances)
-        for env in self._instances[:n]:
-            tobs = env.reset()
-            if state is not None:
-                tobs = env.env.set_state(state)
-            bobs.append(tobs)
-            recorders.append(memory.recorder())
-
-        while (nepisodes is not None and episode_cnt<nepisodes) or (nsteps is not None and step_cnt<nsteps):
-            if policy is None:
-                acts=[e.env.controller() for e in self._instances]
-            else:
-                acts = policy.predict(np.array(bobs))
-
-            if exploration is not None:
-                noises=[e.sample(a) for e,a in zip(exploration,acts)]
-            else:
-                noises=[None]*len(self._instances)
-
-            for i_env, (action, env,recorder,noise) in enumerate(zip(acts, self._instances,recorders, noises)):
-                tobs,reward,done,_=env.step(action)
-                if visualize and i_env==0:
-                    env.render()
-                if noise is not None:
-                    action += noise
-                recorder.record(Experience(bobs[i_env], action, reward, done))
-                if done:
-                    tobs=env.reset()
-                    if state is not None:
-                        tobs=env.env.set_state(state)
-                    if exploration is not None:
-                        exploration[i_env].reset()
-                    episode_cnt+=1
-                bobs[i_env]=tobs
-                step_cnt+=1
-                if nsteps is not None and step_cnt>=nsteps:
-                    break
-        return memory
-
-def episode_summary(memory,critic,gamma,count=32):
-    qvar,qbias=[],[]
-    episode_rewards=[]
-    for obs0, a0, r0, done in memory.episodes():
-        episode_rewards.append(np.sum(r0))
-        q=critic.predict([obs0,a0])
-        dfr=discounted_future(r0,gamma)
-        bias=np.mean(q-dfr)
-        qbias.append(bias)
-        qvar.append(rms(q-dfr-bias))
-        if len(episode_rewards)>=count:
-            break
-    return episode_rewards,qvar,qbias
 
 
 
@@ -301,36 +230,9 @@ class plteval(Callback):
             plt.legend(loc=1, fontsize='xx-small')
         plt.pause(0.1)
 
-class pltmap(Callback):
-    def __init__(self,cluster,func,title="",fignum=None,gsz=25):
-        self.title=title
-        self.fignum=plt.figure(fignum).number
-        self.func=func
-        self.cluster=cluster
-        self.ag1=AutoGrowAxes()
-        self.gsz=100
-        env=self.cluster.env
-        self.extent=(env.observation_space.low[0],env.observation_space.high[0],
-                     env.observation_space.low[1], env.observation_space.high[1])
 
 
-    def on_epoch_end(self,epoch,logs):
-        X, Y = np.meshgrid(np.linspace(self.extent[0],self.extent[1], self.gsz),
-                           np.linspace(self.extent[2], self.extent[3], self.gsz))
-        A=self.func([np.vstack([X.flatten(),Y.flatten()]).T])
-        A=A[0].reshape((self.gsz,self.gsz))
-        fig = plt.figure(self.fignum)
-        plt.clf()
-        fig.suptitle(self.title.format(**{"epoch":epoch}))
-        plt.axis(self.extent)
-        avmin,avmax=self.ag1.lim(A)
-        vmax=max(abs(avmin),abs(avmax))
-        im = plt.imshow(A, cmap=plt.cm.RdBu_r, vmin=-vmax, vmax=vmax, extent=self.extent,origin='lower')
-        im.set_interpolation('bilinear')
-        cb = fig.colorbar(im)
-        plt.pause(0.1)
-
-class plt3(Callback):
+class PltQEval(Callback):
     def __init__(self,cluster,gamma,series,title="",fignum=None):
         self.title=title
         self.fignum=plt.figure(fignum).number
@@ -366,21 +268,22 @@ class plt3(Callback):
             plt.subplot(3,1,1)
             plt.xlim(0,self.cluster.env.spec.max_episode_steps)
             plt.ylim(*self.ag1.lim(ar[:, 0]))
-            plt.plot(ar[:, 0], label=name)
+            #print("plt3 {} len {} ar {}:{}".format(name,r0.shape[0], np.min(ar), np.max(ar)))
+            plt.plot(ar[:, 0], label=name+" policy")
             plt.legend(loc=1,fontsize='xx-small')
             if idx==0:
                 plt.subplot(3,1,2)
                 plt.xlim(0,self.cluster.env.spec.max_episode_steps)
                 plt.ylim(*self.ag2.lim(r0[:, 0]))
-                plt.plot(r0[:, 0], label=name+' reward')
-                plt.plot(q[:-1, 0] - self.gamma * q[1:, 0], label=name+' q delta')
+                plt.plot(r0[:, 0], label=' reward')
+                plt.plot(q[:-1, 0] - self.gamma * q[1:, 0], label=' q delta')
                 plt.legend(loc=4,fontsize='xx-small')
                 plt.subplot(3,1,3)
                 plt.xlim(0,self.cluster.env.spec.max_episode_steps)
                 plt.ylim(*self.ag3.lim(aq[:, 0]))
-                plt.plot(aq[:, 0], label=name+' dfr')
-                plt.plot(q[:, 0], label=name+' q')
-                plt.plot(tdq[:, 0], label=name+' tdq')
+                plt.plot(aq[:, 0], label=' dfr')
+                plt.plot(q[:, 0], label=' q')
+                plt.plot(tdq[:, 0], label=' tdq')
                 plt.legend(loc=4,fontsize='xx-small')
         plt.pause(0.1)
 
@@ -417,32 +320,6 @@ def train_critic(critic, target_actor, target_critic, gamma, generator, callback
         c.on_batch_end(epoch,{})
     return history
 
-
-def create_target(model):
-    # create target networks
-    target_model = clone_model(model)
-    target_model.compile(optimizer='sgd',loss='mse') # will not use optimizer or loss, but need compile
-    target_model.set_weights(model.get_weights())
-    return target_model
-
-def update_target(target, model, tau):
-    target.set_weights([tau * w + (1 - tau) * wp for wp, w in zip(target.get_weights(), model.get_weights())])
-
-class update_target_callback(Callback):
-    def __init__(self,target_actor,actor,target_critic,critic,tau):
-        self.target_actor=target_actor
-        self.actor=actor
-        self.target_critic=target_critic
-        self.critic=critic
-        self.tau=tau
-        self.cnt=0
-
-    def on_batch_end(self,epoch,logs):
-        update_target(self.target_actor,self.actor,self.tau)
-        update_target(self.target_critic,self.critic,self.tau)
-        self.cnt +=1
-        print("Update_target {}".format(self.cnt))
-
 def train_ddpg_actor(actor, memory, callbacks):
     obs0, a0 = memory.obsact()
     actor.fit(obs0, np.zeros_like(a0), shuffle=True, verbose=2, validation_split=0.1, epochs=1, callbacks=callbacks)
@@ -456,182 +333,10 @@ def pretrain_critic(cluster, actor, critic, gamma, cepochs, memory,fignum=None):
         end = time.perf_counter()
         print("Train critic {} {} epochs {}/{}".format(cluster.env.spec.id,end-start,i,cepochs))
 
-class pltmaps(Callback):
-    def __init__(self,cluster,agent,title=""):
-        self.title=title
-        self.afignum=plt.figure().number
-        self.cfignum=plt.figure().number
-        self.cgfignum=plt.figure().number
-        self.cluster=cluster
-        self.agent=agent
-        tmp_combined=self.critic([self.actor.input, self.actor.output])
-        self.combinedf=K.function([self.target_actor.inputs[0]],[tmp_combined])
-        self.actorf=K.function([self.target_actor.inputs[0]],[self.target_actor.outputs[0]])
 
-        combinedgrad=K.gradients(tmp_combined, self.target_actor.outputs[0])
-        self.combinedgradf=K.function([self.target_actor.inputs[0]],combinedgrad)
 
-    def on_epoch_end(self,epoch,logs):
-        pltmap(self.cluster, self.actorf, title="actor a(o)) {epoch}", fignum=self.afignum)
-        pltmap(self.cluster, self.combinedf, title="combined q(o,a(o)) {epoch}", fignum=self.cfignum)
-        pltmap(self.cluster, self.combinedgradf, title="combined grad wrt a(o)) {epoch}", fignum=self.cgfignum)
 
-class plttrends(Callback):
-    def __init__(self,cluster,hist,title=""):
-        self.title=title
-        self.fignum=plt.figure().number
-        self.hist=hist
 
-    def on_epoch_end(self,epoch,logs):
-        plt.figure(self.fignum)
-        plt.clf()
-        plt.suptitle(self.title + " epoch {}".format(epoch))
-        keys=reversed(sorted(self.hist.keys()))
-        n=len(self.hist)
-        for idx,name in enumerate(keys):
-            series=self.hist[name]
-            plt.subplot(n, 1, idx+1)
-            plotdist(plt,series,label=name)
-            plt.axhline(0, color='black')
-            plt.legend(loc=1, fontsize='xx-small')
-        plt.pause(0.1)
-
-class rollouts(Callback):
-    def __init__(self,cluster,policies,visualize=False):
-        self.cluster=cluster
-        self.policies=policies
-
-    def on_epoch_end(self, epoch, logs):
-        # roll out some on policy episodes so we can see the results
-        evalmemory = ExperienceMemory(sz=100000)
-        memories = [ExperienceMemory(sz=100000) for p in self.policies]
-        for policy,memory in zip(self.policies,memories):
-            self.cluster.rollout(policy=self.target_actor, nepisodes=10, memory=evalmemory, exploration=None,
-                             visualize=self.visualize)
-        #todo: make this a callback
-        self.hist["reward"].append(er)
-        self.hist["qvar"].append(qe2)
-        self.hist["qbias"].append(qe2)
-        print("episode summary er {} qe2 {}".format(np.mean(er),np.mean(qe2)))
-        for c in self.callbacks:
-            if hasattr(c,'on_eval_end'):
-                c.on_eval_end(self.epoch, evalmemory)
-
-class Agent:
-    def __init__(self):
-        self.hist={"reward":[]}
-        pass
-    def train(self,*args,**kwargs):
-        self.callbacks=kwargs.pop('callbacks',[])
-        self.visualize=kwargs.get('visualize',False)
-        self.eval=kwargs.get('visualize',True)
-        self.epoch=1
-        self.hist["reward"]=[]
-        self.hist["qvar"]=[]
-        self.hist["qbias"]=[]
-        self._train(*args,**kwargs)
-        #self.eval = reduce(self.callbacks,lambda v,x: v or hasattr(x,'on_eval_end'),False)
-
-    def _train(self):
-        raise NotImplemented("Agent must implement train method")
-
-    def _epoch_end(self,logs):
-        if self.eval:
-            # roll out some on policy episodes so we can see the results
-            evalmemory = ExperienceMemory(sz=100000)
-            self.cluster.rollout(policy=self.target_actor, nepisodes=10, memory=evalmemory, exploration=None,
-                                 visualize=self.visualize)
-            #todo: make this a callback
-            er, qvar,qbias = episode_summary(evalmemory, self.target_critic, self.gamma)
-            self.hist["reward"].append(er)
-            self.hist["qvar"].append(qvar)
-            self.hist["qbias"].append(qbias)
-            print("episode summary er {} qvar {} qbias {}".format(np.mean(er),np.mean(qvar),np.mean(qbias)))
-        for c in self.callbacks:
-            c.on_epoch_end(self.epoch, {})
-        self.epoch+=1
-
-class DDPGAgent(Agent):
-    def __init__(self,cluster,actor,critic,tau=0.001,gamma=0.99,mode=1,batch_size=32):
-        super(DDPGAgent,self).__init__()
-        self.cluster=cluster
-        self.mode=mode
-        self.actor=actor
-        self.tau=tau*50 # scale tau because we update less frequently than ddpg paper
-        self.gamma=gamma
-        self.mode=mode
-        self.target_actor = create_target(actor)
-        self.target_critic = create_target(critic)
-        self.critic=critic
-        self.batch_size=batch_size
-        self.lrdecay_interval=100
-        print("Init")
-
-        self.critic.trainable = True
-        self.critic.compile(optimizer=Adam(lr=0.001, clipnorm=1., decay=1e-6), loss='mse', metrics=['mae', 'acc'])
-        self.critic.summary()
-        if self.mode == 1:
-            self.actor.compile(optimizer=DDPGof(Adam)(self.critic, self.actor, batch_size=batch_size, lr=0.001, clipnorm=1., decay=1e-6),
-                          loss='mse', metrics=['mae', 'acc'])
-        elif self.mode == 2:
-            self.combined = Model([actor.input], critic([actor.input, actor.output]))
-            self.combined.layers[-1].trainable = False
-            self.combined.compile(optimizer=Adam(lr=0.001, clipnorm=1., decay=1e-6), loss='mse',  metrics=['mae', 'acc'])
-            self.critic.trainable=True
-        else:
-            cgrad = K.gradients(critic.outputs, critic.inputs[1])  # grad of Q wrt actions
-            self.cgradf = K.function(critic.inputs, cgrad)
-            actor.compile(optimizer=Adam(lr=0.001, clipnorm=1., decay=1e-6), loss='mse', metrics=['mae', 'acc'])
-
-    def _train(self, memory, epochs=100, fignum=None, visualize=False, callbacks=[]):
-        print("Train critic")
-        self.critic.summary()
-        print("Train combined")
-        self.combined.summary()
-        # Each environment requires an explorer instance
-        explorers = [ OrnstienUhlenbeckExplorer(self.cluster.env.action_space, theta = .15, mu = 0.,nfrac=0.03 ) for i in range(self.cluster.nenv)]
-        generator=memory.obs1generator(batch_size=self.batch_size)
-
-        for i_epoch in range(epochs):
-            for i_batch in range(100):
-                astart = time.perf_counter()
-                obs0, a0, r0, obs1, done = next(generator)
-                tdq = TD_q(self.target_actor, self.target_critic, self.gamma, obs1, r0, done)
-                # nqb=self.critic.predict([obs0,a0])
-                history = self.critic.train_on_batch([obs0, a0], tdq)
-                aend = time.perf_counter()
-
-                # nqa=self.critic.predict([obs0,a0])
-                # dq=nqa-nqb
-                # plt.figure(5)
-                # plt.clf()
-                # plt.plot(tdq-nqb,label='nqb')
-                # plt.plot(tdq-nqa,label='nqa')
-                # plt.legend()
-                # plt.pause(1)
-                start = time.perf_counter()
-                if self.mode==1:
-                    self.actor.train_on_batch(obs0, a0)
-                elif self.mode==2:
-                    self.combined.train_on_batch(obs0,np.zeros_like(r0)) # loss = -q
-                else:
-                    # update the actor : critic.grad()*actor.grad()
-                    actions = self.actor.predict(obs0)
-                    grads = self.cgradf([obs0, actions])[0]
-                    ya = actions + 0.1 * grads  # nudge action in direction that improves Q
-                    self.actor.train_on_batch(obs0, ya)
-                end = time.perf_counter()
-
-                update_target(self.target_actor, self.actor, self.tau)
-                update_target(self.target_critic, self.critic, self.tau)
-
-            self._epoch_end({})
-
-            print("RL Train {} {:0.3f},{:0.3f}  epochs {} of {}".format(self.cluster.envname,
-                end - start, aend-astart, self.epoch, epochs))
-
-            # add some data with latest policy into the memory
-            self.cluster.rollout(policy=self.target_actor, nepisodes=50, memory=memory, exploration=explorers,visualize=False)
 
 #an implementation of
     def possible_decay_schedule(self,explorers):
@@ -662,4 +367,11 @@ class DDPGAgent(Agent):
 
 
 if __name__ == "__main__":
-    run()
+    # envname='Slider-v0'
+    envname = 'Pendulum-v100'
+    # envname = 'PendulumHER-v100'
+    # envname='NServoArm-v6'
+    # envname='ContinuousMountainCart-v100'
+    # cluster = HERRollout(envname, nenvs)
+    cluster=EnvRollout(envname,64)
+    run(cluster, prefill=10000, gamma=0.95, tau=0.02)
