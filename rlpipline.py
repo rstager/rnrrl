@@ -5,7 +5,7 @@ import keras.backend as K
 import numpy as np
 from keras import regularizers
 from keras.callbacks import Callback
-from keras.layers import Dense, Input, concatenate, BatchNormalization
+from keras.layers import Dense, Input, concatenate, BatchNormalization, Activation
 from keras.models import Model, load_model
 from keras.optimizers import Adam
 from matplotlib import pyplot as plt
@@ -77,14 +77,17 @@ def make_models(env):
     ain = Input(shape=env.action_space.shape, name='action')
     oin = Input(shape=env.observation_space.shape, name='observeration')  # full observation
     common_args = kwargs(kernel_initializer='glorot_normal',
-                         activation='relu',
+                         #activation='relu',
                          kernel_regularizer=regularizers.l2(1e-5)
                          # bias_initializer=Constant(value=0.1),
                          )
     x = oin
     x = Dense(64, **common_args)(x)
     x = BatchNormalization()(x)
+    x = Activation('relu')(x)
     x = Dense(32, **common_args)(x)
+    x = BatchNormalization()(x)
+    x = Activation('relu')(x)
     x = Dense(env.action_space.shape[0], activation='linear')(x)
     actor = Model(oin, x, name='actor')
 
@@ -95,8 +98,11 @@ def make_models(env):
     x = oin
     x = concatenate([x, ain], name='sensor_goal_action')
     x = Dense(32, **common_args)(x)
-    #x = BatchNormalization()(x)
+    #x = BatchNormalization()(x)  # for some reason this does not work
+    x = Activation('relu')(x)
     x = Dense(128, **common_args)(x)
+    #x = BatchNormalization()(x)
+    x = Activation('relu')(x)
     x = Dense(1, activation='linear', name='Q')(x)
     critic = Model([oin, ain], x, name='critic')
     return actor,critic
