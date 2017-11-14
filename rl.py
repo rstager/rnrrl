@@ -259,11 +259,12 @@ class EnvRollout:
                 noises=[None]*len(self._instances)
 
             for i_env, (action, env,recorder,noise) in enumerate(zip(acts, self._instances,recorders, noises)):
+                if noise is not None:
+                    action += noise
                 tobs,reward,done,_=env.step(action)
                 if visualize and i_env==0:
                     env.render()
-                if noise is not None:
-                    action += noise
+
                 recorder.record(Experience(bobs[i_env], action, reward, done))
                 if done:
                     tobs=env.reset()
