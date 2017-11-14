@@ -56,8 +56,10 @@ class Agent:
 
 
 class DDPGAgent(Agent):
-    def __init__(self,cluster,actor,critic,tau=0.001,gamma=0.99,mode=2,batch_size=32,lr=0.015,decay=1e-5,clr=None):
+    def __init__(self,cluster,actor,critic,tau=0.001,gamma=0.99,mode=2,batch_size=32,lr=0.015,decay=1e-5,clr=None,
+                 verbose=False,nbatches=100):
         super().__init__()
+        self.verbose=verbose
         self.cluster=cluster
         self.mode=mode
         self.actor=actor
@@ -71,18 +73,18 @@ class DDPGAgent(Agent):
         self.lrdecay_interval=100
         self.lr=lr
         self.clr=clr if clr is not None else lr
-        print("Init")
+        self.nbatches=nbatches
 
         self.critic.trainable = True
         self.critic.compile(optimizer=Adam(lr=self.clr, clipnorm=1., decay=decay), loss='mse', metrics=['mae', 'acc'])
         self.critic._make_train_function()
-        self.critic.summary()
-        print("DDPG mode {}".format(mode))
+        if self.verbose:
+            self.critic.summary()
+        print("DDPG mode {} gamma={} tau={} lr={} clr={} decay={}".format(mode,gamma,tau,lr,clr,decay))
         if self.mode == 1:
             self.actor.compile(optimizer=DDPGof(Adam)(self.critic, self.actor, batch_size=batch_size, lr=self.lr, clipnorm=1., decay=decay),
                           loss='mse', metrics=['mae', 'acc'])
         elif self.mode == 2:
-            print("Combined model")
             self.combined = Model([actor.input], critic([actor.input, actor.output]))
             self.combined.layers[-1].trainable = False
             self.combined.compile(optimizer=Adam(lr=self.lr, clipnorm=1., decay=decay), loss='mse',  metrics=['mae', 'acc'])
@@ -92,27 +94,38 @@ class DDPGAgent(Agent):
             self.cgradf = K.function(critic.inputs, cgrad)
             actor.compile(optimizer=Adam(lr=self.lr, clipnorm=1., decay=decay), loss='mse', metrics=['mae', 'acc'])
 
-    def _train(self, memory, epochs=100, fignum=None, visualize=False, callbacks=[]):
-        print("Train critic")
-        self.critic.summary()
-        if hasattr(self,'combined'):
-            print("Train combined")
-            self.combined.summary()
-        else:
-            print("Train ddpg actor")
-            self.actor.summary()
+    def _train(self, memory=None, epochs=100, nepisodes=50, nsteps=None, fignum=None, visualize=False,minsteps=10000):
+        if memory is None:
+            memory = ExperienceMemory(sz=1000000)
+        if self.verbose:
+            print("Train critic")
+            self.critic.summary()
+            if hasattr(self,'combined'):
+                print("Train combined")
+                self.combined.summary()
+            else:
+                print("Train ddpg actor")
+                self.actor.summary()
         # Each environment requires an explorer instance
         explorers = [ OrnstienUhlenbeckExplorer(self.cluster.env.action_space, theta = .15, mu = 0.,nfrac=0.03 ) for i in range(self.cluster.nenv)]
         generator=memory.obs1generator(batch_size=self.batch_size)
-
+        #explorers = [None]*self.cluster.nenv
+        # sample timing test...
+        # 0.1 ms per next(generator)
+        # 1.2 ms per tdq
+        # 4 ms per train critic
+        # 4ms per train actor
+        # 3ms per update weights
+        # 1.2s for plotting callbacks
+        self.cluster.rollout(policy=self.target_actor, nsteps=minsteps, memory=memory,
+                             exploration=explorers, visualize=visualize)
         for i_epoch in range(epochs):
             start = time.perf_counter()
-            for i_batch in range(100):
+            for i_batch in range(self.nbatches):
                 for i_qtrain in range(1):
                     obs0, a0, r0, obs1, done = next(generator)
                     tdq = TD_q(self.target_actor, self.target_critic, self.gamma, obs1, r0, done)
                     self.critic.train_on_batch([obs0, a0], tdq)
-
                 if self.mode==1:
                     self.actor.train_on_batch(obs0, a0)
                 elif self.mode==2:
@@ -123,14 +136,13 @@ class DDPGAgent(Agent):
                     grads = self.cgradf([obs0, actions])[0]
                     ya = actions + 0.1 * grads  # nudge action in direction that improves Q
                     self.actor.train_on_batch(obs0, ya)
-
                 update_target(self.target_actor, self.actor, self.tau)
                 update_target(self.target_critic, self.critic, self.tau)
-
             self._epoch_end({})
             end = time.perf_counter()
-            print("RL Train {} {:0.3f}  epochs {} of {}".format(self.cluster.envname,
-                end - start,  self.epoch, epochs))
 
             # add some data with latest policy into the memory
-            self.cluster.rollout(policy=self.target_actor, nepisodes=50, memory=memory, exploration=explorers,visualize=visualize)
+            self.cluster.rollout(policy=self.target_actor, nepisodes=nepisodes, nsteps=nsteps, memory=memory,
+                                 exploration=explorers,visualize=visualize)
+            # print("RL Train {} {:0.3f} sec,  epochs {} of {}".format(self.cluster.envname,
+            #     end - start,  self.epoch, epochs))
