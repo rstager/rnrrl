@@ -10,75 +10,70 @@ MemEntry=namedtuple('MemEntry','action,obs1,reward,done,metadata')
 MetaData=namedtuple('MetaData','episode,step,prev')
 class ExperienceMemory():
     class Recorder:
-        def __init__(self, memory,episodic=True):
+        def __init__(self, memory, episodes=None):
             self.memory = memory
             self.md = None
-            self.episodic=episodic
+            self.episodes=episodes
+            self.eidx=None
 
         def record_reset(self, obs0):
-            self.md = self.memory._record(None, obs0, None, None, self.md,self.episodic)
+            self.md,_ = self.memory._record(None, obs0, None, None, self.md)
+            self.eidx = None
 
         def record_step(self,action, obs1, reward, done):
-            self.md = self.memory._record(action, obs1,reward,done, self.md,self.episodic)
+            self.md, ridx = self.memory._record(action, obs1, reward, done, self.md)
+            if self.episodes is not None:
+                if self.eidx is None:
+                    self.eidx = len(self.episodes)
+                    self.episodes.append(-1)
+                self.episodes[self.eidx]=ridx
 
     def __init__(self,sz=10000):
         self.sz=sz
         self.didx=-1
         self.buffer=[]
         self.i_episode=0
-        self._episodes=[]
 
-    def recorder(self,episodic=True):
-        return ExperienceMemory.Recorder(self,episodic)
+    def recorder(self,episodes=None):
+        return ExperienceMemory.Recorder(self,episodes)
 
-    def _record(self, action, obs1, reward, done, md,episodic=True):
+    def _record(self, action, obs1, reward, done, md):
         self.didx += 1
         if self.didx >= self.sz:
             print("recycle memory buffer")
             self.didx = 0
-            self._episodes=[None]*len(self._episodes)
         if md is None:
             md = MetaData(-1, 0, -1)
         # update md if this is a reset
         if action is None:
-                md = MetaData(-1,0,-1) # reset
-        elif episodic: # record steps
+            md = MetaData(-1,0,-1) # reset
+            ridx=None
+        else: # record steps
             if md.episode == -1:
-                for idx in range(len(self._episodes)):
-                    if self._episodes[idx] is None:
-                        break
-                else:
-                    idx=len(self._episodes)
-                    self._episodes.append(-1)
-                md = MetaData(idx, md.step, md.prev)
-            self._episodes[md.episode]=self.didx
+                md = MetaData(self.i_episode, md.step, md.prev)
+                self.i_episode+=1
+            ridx=self.didx
         # add a new memory entry or recycle
         if self.didx==len(self.buffer):
             self.buffer.append(MemEntry(action, obs1, reward, done, md))
         else:
             self.buffer[self.didx]=MemEntry(action, obs1, reward, done, md)
         md = MetaData(md.episode, md.step + 1, self.didx)
-        return md
+        return md, ridx
 
-    def episodes(self):
-        for i in range(len(self._episodes)):
-            yield self.sample_episode(i)
-
-    def sample_episode(self, episode_idx=None):
-        if episode_idx is None:
-            episode_idx=random.randrange(len(self._episodes))
-        assert episode_idx<len(self._episodes)
-        buffer_idx=self._episodes[episode_idx]
-        episode=[]
-        while True:
-            prev=self.buffer[buffer_idx].metadata.prev
-            if  prev == -1:
-                break
-            if buffer_idx>self.didx and prev<self.didx:
-                break # spans fill point
-            episode.insert(0,buffer_idx)
-            buffer_idx=prev
-        return self._np_experience(episode)
+    def episodes(self,idxs):
+        for idx in idxs:
+            episode=[]
+            i_episode=self.buffer[idx].metadata.episode
+            while True:
+                prev=self.buffer[idx].metadata.prev
+                if  prev == -1:
+                    break
+                if self.buffer[prev].metadata.episode!=i_episode:
+                    break # spans fill point
+                episode.insert(0,idx)
+                idx=prev
+            yield self._np_experience(episode)
 
     def _np_experience(self,idxs):
         batchsz=len(idxs)
@@ -234,7 +229,7 @@ class EnvRollout:
         self.env = self._instances[0]
         self.nenv=nenv
 
-    def rollout(self, policy, memory=None,exploration=None,visualize=False,nepisodes=None,nsteps=None,state=None):
+    def rollout(self, policy, memory=None,exploration=None,visualize=False,nepisodes=None,nsteps=None,state=None,episodes=None):
         bobs = []
         recorders=[]
         step_cnt,episode_cnt=0,0
@@ -243,13 +238,12 @@ class EnvRollout:
             memory=ExperienceMemory()
         n= nepisodes if nepisodes is not None and nepisodes<len(self._instances) else len(self._instances)
         for env in self._instances[:n]:
-            recorders.append(memory.recorder())
+            recorders.append(memory.recorder(episodes))
             tobs = env.reset()
             recorders[-1].record_reset(tobs)
             if state is not None:
                 tobs = env.env.set_state(state)
             bobs.append(tobs)
-            recorders.append(memory.recorder())
 
         while (nepisodes is not None and episode_cnt<nepisodes) or (nsteps is not None and step_cnt<nsteps):
             if policy is None:
