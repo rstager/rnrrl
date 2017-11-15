@@ -74,6 +74,8 @@ class DDPGAgent(Agent):
         self.lr=lr
         self.clr=clr if clr is not None else lr
         self.nbatches=nbatches
+        self.freeze_critic=False
+        self.freeze_actor=False
 
         self.critic.trainable = True
         self.critic.compile(optimizer=Adam(lr=self.clr, clipnorm=1., decay=decay), loss='mse', metrics=['mae', 'acc'])
@@ -122,20 +124,22 @@ class DDPGAgent(Agent):
         for i_epoch in range(epochs):
             start = time.perf_counter()
             for i_batch in range(self.nbatches):
-                for i_qtrain in range(1):
-                    obs0, a0, r0, obs1, done = next(generator)
-                    tdq = TD_q(self.target_actor, self.target_critic, self.gamma, obs1, r0, done)
-                    self.critic.train_on_batch([obs0, a0], tdq)
-                if self.mode==1:
-                    self.actor.train_on_batch(obs0, a0)
-                elif self.mode==2:
-                    self.combined.train_on_batch(obs0,np.zeros_like(r0)) # loss = -q
-                else:
-                    # update the actor : critic.grad()*actor.grad()
-                    actions = self.actor.predict(obs0)
-                    grads = self.cgradf([obs0, actions])[0]
-                    ya = actions + 0.1 * grads  # nudge action in direction that improves Q
-                    self.actor.train_on_batch(obs0, ya)
+                if not self.freeze_critic:
+                    for i_qtrain in range(1):
+                        obs0, a0, r0, obs1, done = next(generator)
+                        tdq = TD_q(self.target_actor, self.target_critic, self.gamma, obs1, r0, done)
+                        self.critic.train_on_batch([obs0, a0], tdq)
+                if not self.freeze_actor:
+                    if self.mode==1:
+                        self.actor.train_on_batch(obs0, a0)
+                    elif self.mode==2:
+                        self.combined.train_on_batch(obs0,np.zeros_like(r0)) # loss = -q
+                    else:
+                        # update the actor : critic.grad()*actor.grad()
+                        actions = self.actor.predict(obs0)
+                        grads = self.cgradf([obs0, actions])[0]
+                        ya = actions + 0.1 * grads  # nudge action in direction that improves Q
+                        self.actor.train_on_batch(obs0, ya)
                 update_target(self.target_actor, self.actor, self.tau)
                 update_target(self.target_critic, self.critic, self.tau)
             self._epoch_end({})
