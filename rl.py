@@ -6,7 +6,7 @@ import gym
 from rnr.segment_tree import SumSegmentTree
 
 Experience = namedtuple('Experience', 'obs, action, reward, done')
-MemEntry=namedtuple('MemEntry','data,metadata')
+MemEntry=namedtuple('MemEntry','action,obs1,reward,done,metadata')
 MetaData=namedtuple('MetaData','episode,step,prev')
 class ExperienceMemory():
     class Recorder:
@@ -15,11 +15,11 @@ class ExperienceMemory():
             self.md = None
             self.episodic=episodic
 
-        def record(self, experience):
-            self.md = self.memory._record(experience, self.md,self.episodic)
+        def record_reset(self, obs0):
+            self.md = self.memory._record(None, obs0, None, None, self.md,self.episodic)
 
-        def reset(self):
-            self.md = None
+        def record_step(self,action, obs1, reward, done):
+            self.md = self.memory._record(action, obs1,reward,done, self.md,self.episodic)
 
     def __init__(self,sz=10000):
         self.sz=sz
@@ -31,25 +31,33 @@ class ExperienceMemory():
     def recorder(self,episodic=True):
         return ExperienceMemory.Recorder(self,episodic)
 
-    def _record(self, experience, md,episodic=True):
+    def _record(self, action, obs1, reward, done, md,episodic=True):
         self.didx += 1
         if self.didx >= self.sz:
+            print("recycle memory buffer")
             self.didx = 0
-        if episodic:
-            if md is None:
-                md= MetaData(self.i_episode, 0, -1) #episode,step,prev
-                self._episodes.append(self.didx)
-                self.i_episode+=1
-            self._episodes[md.episode]=self.didx #update last entry in episode
-        else:
-            if md is None:
-                md = MetaData(-1, 0, -1)  # episode,step,prev
+            self._episodes=[None]*len(self._episodes)
+        if md is None:
+            md = MetaData(-1, 0, -1)
+        # update md if this is a reset
+        if action is None:
+                md = MetaData(-1,0,-1) # reset
+        elif episodic: # record steps
+            if md.episode == -1:
+                for idx in range(len(self._episodes)):
+                    if self._episodes[idx] is None:
+                        break
+                else:
+                    idx=len(self._episodes)
+                    self._episodes.append(-1)
+                md = MetaData(idx, md.step, md.prev)
+            self._episodes[md.episode]=self.didx
+        # add a new memory entry or recycle
         if self.didx==len(self.buffer):
-            self.buffer.append(MemEntry(experience, md))
+            self.buffer.append(MemEntry(action, obs1, reward, done, md))
         else:
-            self.buffer[self.didx]=MemEntry(experience, md)
-        md = MetaData(md.episode, md.step + 1, self.didx) if not experience.done else None
-
+            self.buffer[self.didx]=MemEntry(action, obs1, reward, done, md)
+        md = MetaData(md.episode, md.step + 1, self.didx)
         return md
 
     def episodes(self):
@@ -61,28 +69,29 @@ class ExperienceMemory():
             episode_idx=random.randrange(len(self._episodes))
         assert episode_idx<len(self._episodes)
         buffer_idx=self._episodes[episode_idx]
-        episode=[buffer_idx]
+        episode=[]
         while True:
             prev=self.buffer[buffer_idx].metadata.prev
             if  prev == -1:
                 break
             if buffer_idx>self.didx and prev<self.didx:
                 break # spans fill point
-            buffer_idx=prev
             episode.insert(0,buffer_idx)
+            buffer_idx=prev
         return self._np_experience(episode)
 
     def _np_experience(self,idxs):
         batchsz=len(idxs)
-        Sobs = np.empty((batchsz,) + self.buffer[0].data.obs.shape)
-        Saction=np.empty((batchsz,) + self.buffer[0].data.action.shape)
+        Sobs = np.empty((batchsz,) + self.buffer[idxs[0]].obs1.shape)
+        Saction=np.empty((batchsz,) + self.buffer[idxs[0]].action.shape)
         Sreward=np.empty((batchsz,1))
         Sdone=np.empty((batchsz,1))
         for idx, s in enumerate(idxs):
-            Sobs[idx]=self.buffer[s].data.obs
-            Saction[idx]=self.buffer[s].data.action
-            Sreward[idx]=self.buffer[s].data.reward
-            Sdone[idx]=self.buffer[s].data.done
+            assert self.buffer[s].metadata.prev != -1
+            Sobs[idx]=self.buffer[self.buffer[s].metadata.prev].obs1
+            Saction[idx]=self.buffer[s].action
+            Sreward[idx]=self.buffer[s].reward
+            Sdone[idx]=self.buffer[s].done
         return Sobs,Saction,Sreward,Sdone
 
 
@@ -104,26 +113,19 @@ class ExperienceMemory():
             done=[]
             for idx in idxs:
                 r=self.buffer[idx]
-                if idx>=self.didx and r.metadata.prev < self.didx:
-                    continue # skip events that span the fill point
-                # because it is easier to keep a previous pointer,
-                # the last experience is sampled twice, the first is not sampled at all
-                if r.data.done: # if it is the end, use this sample
-                    a0.append(r.data.action)
-                    r0.append(r.data.reward)
-                    obs0.append(r.data.obs)
-                    obs1.append(np.zeros_like(r.data.obs))
-                    done.append(r.data.done)
-                if r.metadata.prev != -1: #sample is first in episode
-                    obs1.append(r.data.obs)
-                    pr=self.buffer[r.metadata.prev]
-                    a0.append(pr.data.action)
-                    r0.append(pr.data.reward)
-                    obs0.append(pr.data.obs)
-                    done.append(pr.data.done)
+                if idx >= self.didx and r.metadata.prev < self.didx:
+                    continue  # skip events that span the fill point
+                if r.metadata.prev != -1: #sample is not the reset
+                    pr = self.buffer[r.metadata.prev]
+                    a0.append(r.action)
+                    obs1.append(r.obs1)
+                    r0.append(r.reward)
+                    done.append(r.done)
+                    obs0.append(pr.obs1)
+
             yield np.array(obs0),np.array(a0),np.expand_dims(np.array(r0),axis=-1),np.array(obs1),np.expand_dims(np.array(done),axis=-1)
 
-    def obsact(self):
+    def _obsact(self):
         obs0=[]
         a0=[]
         for r in self.buffer:
@@ -131,7 +133,7 @@ class ExperienceMemory():
             a0.append(r.data.action)
         return np.array(obs0),np.array(a0)
 
-    def obs1act(self):
+    def _obs1act(self):
         obs0=[]
         a0=[]
         r0=[]
@@ -241,7 +243,9 @@ class EnvRollout:
             memory=ExperienceMemory()
         n= nepisodes if nepisodes is not None and nepisodes<len(self._instances) else len(self._instances)
         for env in self._instances[:n]:
+            recorders.append(memory.recorder())
             tobs = env.reset()
+            recorders[-1].record_reset(tobs)
             if state is not None:
                 tobs = env.env.set_state(state)
             bobs.append(tobs)
@@ -262,12 +266,12 @@ class EnvRollout:
                 if noise is not None:
                     action += noise
                 tobs,reward,done,_=env.step(action)
+                recorder.record_step(action,tobs, reward, done)
                 if visualize and i_env==0:
                     env.render()
-
-                recorder.record(Experience(bobs[i_env], action, reward, done))
                 if done:
                     tobs=env.reset()
+                    recorder.record_reset(tobs)
                     if state is not None:
                         tobs=env.env.set_state(state)
                     if exploration is not None:
