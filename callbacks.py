@@ -27,11 +27,12 @@ class ActorCriticEval(Callback):
     def on_epoch_end(self, epoch, logs):
         # roll out some on policy episodes so we can see the results
         evalmemory = ExperienceMemory(sz=100000)
+        episodes=[]
         self.cluster.rollout(policy=self.actor, nepisodes=self.nepisodes, memory=evalmemory, exploration=None,
-                             visualize=self.visualize)
+                             visualize=self.visualize,episodes=episodes)
         qvar, qbias = [], []
         episode_rewards = []
-        for obs0, a0, r0, done in evalmemory.episodes():
+        for obs0, a0, r0, done in evalmemory.episodes(episodes):
             episode_rewards.append(np.sum(r0))
             q = self.critic.predict([obs0, a0])
             dfr = discounted_future(r0, self.gamma)
@@ -96,8 +97,9 @@ class PltQEval(Callback):
         start_state=self.cluster.env.env.get_state()
         for idx,(name,actor,critic) in enumerate(self.series):
             if actor is None and not hasattr(actor,'controller'): continue
-            memory = self.cluster.rollout(actor, nepisodes=1,state=start_state)
-            obs0, a0, r0, done = memory.sample_episode()
+            episodes=[]
+            memory = self.cluster.rollout(actor, nepisodes=1,state=start_state,episodes=episodes)
+            obs0, a0, r0, done = next(memory.episodes(episodes))
             q=critic.predict([obs0, a0])
             ar=np.copy(r0)
             for i in range(1,ar.shape[0]):
@@ -153,8 +155,9 @@ class PltObservation(Callback):
         plt.suptitle(self.title + " epoch {}".format(epoch))
 
         self.cluster.env.reset()
-        memory = self.cluster.rollout(self.policy, nepisodes=1)
-        obs, act, reward, done = memory.sample_episode()
+        episodes=[]
+        memory = self.cluster.rollout(self.policy, nepisodes=1,episodes=episodes)
+        obs, act, reward, done = next(memory.episodes(episodes))
         for i in range(self.nobs):
             plt.subplot(self.nplots, 1, i+1)
             plt.plot(obs[:, i], label="obs{}".format(i))
