@@ -57,7 +57,7 @@ class Agent:
 
 class DDPGAgent(Agent):
     def __init__(self,cluster,actor,critic,tau=0.001,gamma=0.99,mode=2,batch_size=32,lr=0.015,decay=1e-5,clr=None,
-                 verbose=False,nbatches=100):
+                 clip_tdq=True,end_gamma=False,critic_training_cycles=1,verbose=False,nbatches=100):
         super().__init__()
         self.verbose=verbose
         self.cluster=cluster
@@ -76,13 +76,17 @@ class DDPGAgent(Agent):
         self.nbatches=nbatches
         self.freeze_critic=False
         self.freeze_actor=False
+        self.clip_tdq=clip_tdq
+        self.end_gamma=end_gamma
+        self.critic_training_cycles=critic_training_cycles
 
         self.critic.trainable = True
         self.critic.compile(optimizer=Adam(lr=self.clr, clipnorm=1., decay=decay), loss='mse', metrics=['mae', 'acc'])
         self.critic._make_train_function()
         if self.verbose:
             self.critic.summary()
-        print("DDPG mode {} gamma={} tau={} lr={} clr={} decay={}".format(mode,gamma,tau,lr,clr,decay))
+        print("DDPG mode {} gamma={:.3e} tau={:.3e} lr={:.3e} clr={:.3e} decay={:.3e} cycles={} bsz={}".format(mode,gamma,tau,lr,clr,decay,
+                                                                                    self.critic_training_cycles,self.batch_size))
         if self.mode == 1:
             self.actor.compile(optimizer=DDPGof(Adam)(self.critic, self.actor, batch_size=batch_size, lr=self.lr, clipnorm=1., decay=decay),
                           loss='mse', metrics=['mae', 'acc'])
@@ -110,7 +114,7 @@ class DDPGAgent(Agent):
                 self.actor.summary()
         # Each environment requires an explorer instance
         explorers = [ OrnstienUhlenbeckExplorer(self.cluster.env.action_space, theta = .15, mu = 0.,nfrac=0.03 ) for i in range(self.cluster.nenv)]
-        generator=memory.obs1generator(batch_size=self.batch_size)
+        generator=memory.obs1generator(batch_size=self.batch_size,showdone=True)
         #explorers = [None]*self.cluster.nenv
         # sample timing test...
         # 0.1 ms per next(generator)
@@ -125,9 +129,12 @@ class DDPGAgent(Agent):
             start = time.perf_counter()
             for i_batch in range(self.nbatches):
                 if not self.freeze_critic:
-                    for i_qtrain in range(1):
+                    for i_qtrain in range(self.critic_training_cycles):
                         obs0, a0, r0, obs1, done = next(generator)
-                        tdq = TD_q(self.target_actor, self.target_critic, self.gamma, obs1, r0, done)
+                        tdq = TD_q(self.target_actor, self.target_critic, self.gamma, obs1, r0, done,
+                                   end_gamma=self.end_gamma)
+                        if self.clip_tdq is not None:
+                            tdq = np.clip(tdq, self.clip_tdq / (1 - self.gamma), 0)
                         self.critic.train_on_batch([obs0, a0], tdq)
                 if not self.freeze_actor:
                     if self.mode==1:
