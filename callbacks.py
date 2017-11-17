@@ -69,6 +69,91 @@ class PlotDist(Callback):
         plotdict(plt,self.stats,plotter=plotmeanstd)
         plt.pause(0.001)
 
+class ActorCriticRollout(Callback):
+    def __init__(self,cluster,actor=None,critic=None,series=None,callbacks=None,nepisodes=1):
+        self.cluster=cluster
+        if series is None:
+            series=[('',actor,critic)]
+        self.series=series
+        self.callbacks=callbacks
+        self.nepisodes=1
+        pass
+
+    def on_epoch_end(self, epoch, logs):
+        self.cluster.env.env.reset()
+        assert hasattr(self.cluster.env.env, 'get_state'), "SeriesRollout requires environment have get/set_state"
+        start_state = self.cluster.env.env.get_state()
+        memory = None
+        results=[]
+        for idx, (name, actor, critic) in enumerate(self.series):
+            if actor is None and not hasattr(actor, 'controller'): continue
+            episodes = []
+            memory = self.cluster.rollout(actor, memory=memory, nepisodes=self.nepisodes, state=start_state, episodes=episodes)
+            tmp=[]
+            for obs0, a0, r0, done in memory.episodes(episodes):
+                q=critic.predict([obs0, a0])
+                tmp.append(q)
+            results.append((name,actor,critic,episodes,tmp))
+        for callback in self.callbacks:
+            callback.on_epoch_end(epoch,logs,memory,results)
+
+class PltQEval2(Callback):
+    def __init__(self,gamma,series,title="",fignum=None,skip=1):
+        self.title=title
+        self.fignum=plt.figure(fignum).number
+        self.series=series
+        self.gamma=gamma
+        self.ag1=AutoGrowAxes()
+        self.ag2=AutoGrowAxes()
+        self.ag3=AutoGrowAxes()
+        self.skip=skip
+        self.lastt=time.perf_counter()
+
+    def on_epoch_end(self,epoch,logs, memory=None, results=None):
+        if epoch % self.skip != 0:
+            return
+
+        t=time.perf_counter()
+        self.tdiff=t-self.lastt
+        self.lastt=t
+        plt.figure(self.fignum)
+        plt.clf()
+        plt.suptitle(self.title+" {} epoch {} in {:.3f} sec".format(self.cluster.env.spec.id, epoch,self.tdiff))
+
+        for idx,(name,actor,critic,episodes,qs) in enumerate(self.results):
+            if actor is None and not hasattr(actor,'controller'): continue
+            for  (obs0, a0, r0, done),q in zip(memory.episodes(episodes),qs):
+                ar=np.copy(r0)
+                for i in range(1,ar.shape[0]):
+                    ar[i] += ar[i-1]
+                aq = np.copy(r0)
+                last = 0
+                for i in reversed(range(aq.shape[0])):
+                    aq[i] += self.gamma * last
+                    last = aq[i]
+                tdq = TD_q(actor, critic, self.gamma, np.vstack([obs0[1:],np.zeros_like(obs0[0])]), r0, done)
+
+                plt.subplot(3,1,1)
+                plt.xlim(0,self.cluster.env.spec.max_episode_steps)
+                plt.ylim(*self.ag1.lim(ar[:, 0]))
+                #print("plt3 {} len {} ar {}:{}".format(name,r0.shape[0], np.min(ar), np.max(ar)))
+                plt.plot(ar[:, 0], label=name+" policy")
+                plt.legend(loc=1,fontsize='xx-small')
+                plt.subplot(3,1,2)
+                plt.xlim(0,self.cluster.env.spec.max_episode_steps)
+                plt.ylim(*self.ag2.lim(r0[:, 0]))
+                plt.plot(r0[:, 0], label=' reward')
+                plt.plot(q[:-1, 0] - self.gamma * q[1:, 0], label=' q delta')
+                plt.legend(loc=4,fontsize='xx-small')
+                plt.subplot(3,1,3)
+                plt.xlim(0,self.cluster.env.spec.max_episode_steps)
+                plt.ylim(*self.ag3.lim(aq[:, 0]))
+                plt.plot(aq[:, 0], label=' dfr')
+                plt.plot(q[:, 0], label=' q')
+                plt.plot(tdq[:, 0], label=' tdq')
+                plt.legend(loc=4,fontsize='xx-small')
+        plt.pause(0.001)
+
 class PltQEval(Callback):
     def __init__(self,cluster,gamma,series,title="",fignum=None,skip=1):
         self.title=title
@@ -82,23 +167,28 @@ class PltQEval(Callback):
         self.skip=skip
         self.lastt=time.perf_counter()
 
-
-    def on_epoch_end(self,epoch,logs):
+    def on_epoch_end(self,epoch,logs, memory=None, episodes=None):
         if epoch % self.skip != 0:
             return
+        if memory is None or episodes is None:
+            self.cluster.env.env.reset()
+            assert hasattr(self.cluster.env.env, 'get_state'), "plt3 requires environment have get/set_state"
+            start_state = self.cluster.env.env.get_state()
+            memory=None
+            episodes=[]
+            for idx, (name, actor, critic) in enumerate(self.series):
+                if actor is None and not hasattr(actor, 'controller'): continue
+                memory = self.cluster.rollout(actor, memory=memory, nepisodes=1, state=start_state, episodes=episodes)
+
         t=time.perf_counter()
         self.tdiff=t-self.lastt
         self.lastt=t
         plt.figure(self.fignum)
         plt.clf()
         plt.suptitle(self.title+" {} epoch {} in {:.3f} sec".format(self.cluster.env.spec.id, epoch,self.tdiff))
-        self.cluster.env.env.reset()
-        assert hasattr(self.cluster.env.env,'get_state'),"plt3 requires environment have get/set_state"
-        start_state=self.cluster.env.env.get_state()
+
         for idx,(name,actor,critic) in enumerate(self.series):
             if actor is None and not hasattr(actor,'controller'): continue
-            episodes=[]
-            memory = self.cluster.rollout(actor, nepisodes=1,state=start_state,episodes=episodes)
             obs0, a0, r0, done = next(memory.episodes(episodes))
             q=critic.predict([obs0, a0])
             ar=np.copy(r0)
@@ -146,34 +236,32 @@ class PltObservation(Callback):
         self.nplots=self.nobs+self.nacts+1
         self.ag=[AutoGrowAxes() for i in range(1+self.nobs+self.nacts)]
 
-    def on_epoch_end(self,epoch,logs):
+    def on_epoch_end(self,epoch,logs,memory=None,episodes=None,qs=None):
         if epoch % self.skip != 0:
             return
+
         env=self.cluster.env
         plt.figure(self.fignum)
         plt.clf()
         plt.suptitle(self.title + " epoch {}".format(epoch))
 
-        self.cluster.env.reset()
-        episodes=[]
-        memory = self.cluster.rollout(self.policy, nepisodes=1,episodes=episodes)
-        obs, act, reward, done = next(memory.episodes(episodes))
-        for i in range(self.nobs):
-            plt.subplot(self.nplots, 1, i+1)
-            plt.plot(obs[:, i], label="obs{}".format(i))
+        for obs, act, reward, done in memory.episodes(episodes):
+            for i in range(self.nobs):
+                plt.subplot(self.nplots, 1, i+1)
+                plt.plot(obs[:, i], label="obs{}".format(i))
+                plt.xlim(0,self.env.spec.max_episode_steps)
+                plt.legend(loc=1,fontsize='xx-small')
+
+            for i in range(self.nacts):
+                plt.subplot(self.nplots, 1, i+1+self.nobs)
+                plt.plot(act[:, i], label="act{}".format(i))
+                plt.xlim(0,self.env.spec.max_episode_steps)
+                plt.legend(loc=1,fontsize='xx-small')
+
+            plt.subplot(self.nplots, 1, 1+self.nobs+self.nacts)
+            plt.plot(reward[:,0], label="reward")
             plt.xlim(0,self.env.spec.max_episode_steps)
             plt.legend(loc=1,fontsize='xx-small')
-
-        for i in range(self.nacts):
-            plt.subplot(self.nplots, 1, i+1+self.nobs)
-            plt.plot(act[:, i], label="act{}".format(i))
-            plt.xlim(0,self.env.spec.max_episode_steps)
-            plt.legend(loc=1,fontsize='xx-small')
-
-        plt.subplot(self.nplots, 1, 1+self.nobs+self.nacts)
-        plt.plot(reward[:,0], label="reward")
-        plt.xlim(0,self.env.spec.max_episode_steps)
-        plt.legend(loc=1,fontsize='xx-small')
 
         plt.pause(0.001)
 
