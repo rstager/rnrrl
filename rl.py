@@ -28,7 +28,7 @@ class ExperienceMemory():
                     self.episodes.append(-1)
                 self.episodes[self.eidx]=ridx
 
-    def __init__(self,sz=10000):
+    def __init__(self,sz=100000):
         self.sz=sz
         self.didx=-1
         self.buffer=[]
@@ -40,7 +40,6 @@ class ExperienceMemory():
     def _record(self, action, obs1, reward, done, md):
         self.didx += 1
         if self.didx >= self.sz:
-            print("recycle memory buffer")
             self.didx = 0
         if md is None:
             md = MetaData(-1, 0, -1)
@@ -61,7 +60,7 @@ class ExperienceMemory():
         md = MetaData(md.episode, md.step + 1, self.didx)
         return md, ridx
 
-    def episodes(self,idxs):
+    def episodes(self,idxs,terminus=False):
         for idx in idxs:
             episode=[]
             i_episode=self.buffer[idx].metadata.episode
@@ -69,14 +68,15 @@ class ExperienceMemory():
                 prev=self.buffer[idx].metadata.prev
                 if  prev == -1:
                     break
-                if self.buffer[prev].metadata.episode!=i_episode:
+                if self.buffer[idx].metadata.episode!=i_episode:
                     break # spans fill point
                 episode.insert(0,idx)
                 idx=prev
-            yield self._np_experience(episode)
+            yield self._np_experience(episode,terminus)
 
-    def _np_experience(self,idxs):
-        batchsz=len(idxs)
+
+    def _np_experience(self,idxs,terminus=False): # terminus includes the observation after the done
+        batchsz=len(idxs)+(1 if terminus else 0)
         Sobs = np.empty((batchsz,) + self.buffer[idxs[0]].obs1.shape)
         Saction=np.empty((batchsz,) + self.buffer[idxs[0]].action.shape)
         Sreward=np.empty((batchsz,1))
@@ -87,26 +87,27 @@ class ExperienceMemory():
             Saction[idx]=self.buffer[s].action
             Sreward[idx]=self.buffer[s].reward
             Sdone[idx]=self.buffer[s].done
+        if terminus:
+            Sobs[-1]=self.buffer[idxs[-1]].obs1
+            Saction[-1]=None
+            Sreward[-1]=None
+            Sdone[-1]=None
         return Sobs,Saction,Sreward,Sdone
 
 
-    def obs1generator(self,batch_size=32,oversample_done=None):
+    def obs1generator(self,batch_size=32,oversample_done=None,showdone=False):
         assert len(self.buffer) > 0
         while True:
-            if oversample_done is None:
-                idxs=np.random.choice(len(self.buffer),size=batch_size)
-            else:
-                p = np.array([r.data.done * oversample_done + 1 for r in self.buffer])
-                p = p/np.sum(p)
-                idxs=np.random.choice(p.shape[0],size=batch_size,p=p)
-
-            #idxs=np.random.choice(len(self.buffer),size=batch_size)
             obs0 = []
             obs1 = []
             a0=[]
             r0=[]
             done=[]
-            for idx in idxs:
+            for cnt in range(batch_size):
+                while True:
+                    idx=random.randrange(len(self.buffer))
+                    if self.buffer[idx].metadata.prev != -1:
+                        break
                 r=self.buffer[idx]
                 if idx >= self.didx and r.metadata.prev < self.didx:
                     continue  # skip events that span the fill point
@@ -209,12 +210,16 @@ def discounted_future(reward,gamma):
             last = df[i]
         return df
 
-def TD_q(target_actor, target_critic, gamma, obs1, r0, done):
+def TD_q(target_actor, target_critic, gamma, obs1, r0, done,end_gamma=False):
     assert obs1.shape[0]==r0.shape[0],"Observation and reward sizes must match"
     assert r0.shape[-1]==1 and done.shape[-1]==1,"Reward and done have shape [None,1]"
     a1 = target_actor.predict([obs1])
     q1 = target_critic.predict([obs1, a1])
-    n=np.select([np.logical_not(done)], [gamma * np.array(q1)], 0)
+    if end_gamma:
+        n=gamma*q1
+    else:
+        s=np.logical_not(done).astype(bool)
+        n=np.select([s], [gamma * np.array(q1)], 0)
     #
     # print("n mean={}".format(np.mean(n)))
     qt = r0 + n
