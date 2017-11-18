@@ -18,8 +18,10 @@ from hindsight import HEREnvRollout
 from rl import EnvRollout
 from rlagents import DDPGAgent
 from rnr.gym import rnrenvs
+from rnr.movieplot import MoviePlot
 from rnr.util import kwargs
 
+import matplotlib.pyplot as plt
 
 def make_models(env,reg=1e-4):
     ain = Input(shape=env.action_space.shape, name='action')
@@ -66,9 +68,10 @@ def objective(kwargs):
     #callbacks.append(PltObservation(cluster, agent.target_actor, fignum=3))
     agent.train(epochs=epochs, fignum=1, visualize=True,callbacks=callbacks)
 
-    reward=np.array(eval.hist['reward'])
-    n=min(int(reward.shape[0]*0.2),20) # last 20% or 20 epochs
-    loss= -np.median(reward[-n:]) # median reward of the last nepochs
+    reward=eval.hist['reward']
+    r1=np.array(reward)
+    n=min(int(r1.shape[0]*0.2),20) # last 20% or 20 epochs
+    loss= -np.median(r1[-n:]) # median reward of the last nepochs
     print("loss={loss:.0f} gamma={gamma:.3f} tau={tau:.3e} lr={lr:.3e} clr={clr:.3e} decay={decay:.3e}".format(loss=loss,**kwargs))
     return {
         'loss': loss,
@@ -80,7 +83,7 @@ def run():
     rnrenvs()
 
     trials = Trials()
-    cluster = EnvRollout('Slider-v2', 64)
+    cluster = EnvRollout('Slider-v3', 64)
     space = {
             'cluster':cluster,
             'gamma':0.9,
@@ -108,6 +111,7 @@ def run():
             'end_gamma': False,
             'critic_training_cycles': 10,
             'batch_size': 32,
+            'nfrac':0.1,
          }
     # space = { #baseline parameters
     #         #'actor':actor,
@@ -150,15 +154,15 @@ def run():
     #         'decay':0.0005,
     #     }
 
-    #movie = MoviePlot({3:"NRL"}, path='experiments/hoptest')
-    #movie.grab_on_pause(plt)
 
+    movie = MoviePlot("RL", path='experiments/latest')
+    movie.grab_on_pause(plt)
     best = fmin(objective,
         space=space,
         algo=tpe.suggest,
         max_evals=30,
         trials=trials)
-
+    movie.finish()
     print(best)
     with open('trials.p','wb') as f:
         pickle.dump(trials,f)
