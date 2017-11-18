@@ -57,7 +57,7 @@ class Agent:
 
 class DDPGAgent(Agent):
     def __init__(self,cluster,actor,critic,tau=0.001,gamma=0.99,mode=2,batch_size=32,lr=0.015,decay=1e-5,clr=None,
-                 clip_tdq=True,end_gamma=False,critic_training_cycles=1,verbose=False,nbatches=100):
+                 clip_tdq=True,end_gamma=False,critic_training_cycles=1,verbose=False,nbatches=100,nfrac=0.03):
         super().__init__()
         self.verbose=verbose
         self.cluster=cluster
@@ -79,6 +79,7 @@ class DDPGAgent(Agent):
         self.clip_tdq=clip_tdq
         self.end_gamma=end_gamma
         self.critic_training_cycles=critic_training_cycles
+        self.nfrac=nfrac
 
         self.critic.trainable = True
         self.critic.compile(optimizer=Adam(lr=self.clr, clipnorm=1., decay=decay), loss='mse', metrics=['mae', 'acc'])
@@ -113,7 +114,7 @@ class DDPGAgent(Agent):
                 print("Train ddpg actor")
                 self.actor.summary()
         # Each environment requires an explorer instance
-        explorers = [ OrnstienUhlenbeckExplorer(self.cluster.env.action_space, theta = .15, mu = 0.,nfrac=0.03 ) for i in range(self.cluster.nenv)]
+        explorers = [ OrnstienUhlenbeckExplorer(self.cluster.env.action_space, theta = .15, mu = 0.,nfrac=self.nfrac) for i in range(self.cluster.nenv)]
         generator=memory.obs1generator(batch_size=self.batch_size,showdone=True)
         #explorers = [None]*self.cluster.nenv
         # sample timing test...
