@@ -35,7 +35,7 @@ class ActorCriticEval(Callback):
         for obs0, a0, r0, done in evalmemory.episodes(episodes):
             episode_rewards.append(np.sum(r0))
             q = self.critic.predict([obs0, a0])
-            dfr = discounted_future(r0, self.gamma)
+            dfr = discounted_future(r0, self.gamma,done[-1])
             qe=q-dfr
             qbias.append(np.mean(qe))
             qvar.append(np.std(qe))
@@ -164,6 +164,7 @@ class PltQEval(Callback):
         self.ag1=AutoGrowAxes()
         self.ag2=AutoGrowAxes()
         self.ag3=AutoGrowAxes()
+
         self.skip=skip
         self.lastt=time.perf_counter()
 
@@ -189,17 +190,18 @@ class PltQEval(Callback):
 
         for idx,(name,actor,critic) in enumerate(self.series):
             if actor is None and not hasattr(actor,'controller'): continue
-            obs0, a0, r0, done = next(memory.episodes(episodes))
+            obs0, a0, r0, done,obs1 = next(memory.episodes1(episodes))
             q=critic.predict([obs0, a0])
             ar=np.copy(r0)
             for i in range(1,ar.shape[0]):
                 ar[i] += ar[i-1]
+            dfr=discounted_future(r0,self.gamma,done[-1])
             aq = np.copy(r0)
-            last = 0
-            for i in reversed(range(aq.shape[0])):
-                aq[i] += self.gamma * last
-                last = aq[i]
-            tdq = TD_q(actor, critic, self.gamma, np.vstack([obs0[1:],np.zeros_like(obs0[0])]), r0, done)
+            # last = 0
+            # for i in reversed(range(aq.shape[0])):
+            #     aq[i] += self.gamma * last
+            #     last = aq[i]
+            tdq = TD_q(actor, critic, self.gamma, obs1, r0, done)
 
             plt.subplot(3,1,1)
             plt.xlim(0,self.cluster.env.spec.max_episode_steps)
@@ -208,6 +210,9 @@ class PltQEval(Callback):
             plt.plot(ar[:, 0], label=name+" policy")
             plt.legend(loc=1,fontsize='xx-small')
             if idx==0:
+                self.ag1.lim([0])
+                self.ag2.lim([0])
+                self.ag3.lim([0])
                 plt.subplot(3,1,2)
                 plt.xlim(0,self.cluster.env.spec.max_episode_steps)
                 plt.ylim(*self.ag2.lim(r0[:, 0]))
@@ -216,8 +221,8 @@ class PltQEval(Callback):
                 plt.legend(loc=4,fontsize='xx-small')
                 plt.subplot(3,1,3)
                 plt.xlim(0,self.cluster.env.spec.max_episode_steps)
-                plt.ylim(*self.ag3.lim(aq[:, 0]))
-                plt.plot(aq[:, 0], label=' dfr')
+                plt.ylim(*self.ag3.lim(dfr[:, 0]))
+                plt.plot(dfr[:, 0], label=' dfr')
                 plt.plot(q[:, 0], label=' q')
                 plt.plot(tdq[:, 0], label=' tdq')
                 plt.legend(loc=4,fontsize='xx-small')
