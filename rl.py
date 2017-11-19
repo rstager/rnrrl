@@ -1,7 +1,6 @@
 from collections import namedtuple
 import random
 import numpy as np
-from sympy import ceiling, ln
 
 import gym
 
