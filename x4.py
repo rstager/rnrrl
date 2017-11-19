@@ -1,5 +1,7 @@
 '''
-experiment : improve pendulum solution performance and stability
+experiment : DDPGAgent validation test for slider.
+Do not change.
+Should converge in 30-50 epochs
 '''
 
 import os
@@ -15,7 +17,7 @@ from keras.layers import Dense, concatenate, Lambda
 import gym
 from callbacks import ActorCriticEval, PlotDist, PltQEval, PltObservation
 from hindsight import HEREnvRollout
-from rl import EnvRollout
+from rl import EnvRollout, PrioritizedMemory, TD_q
 from rlagents import DDPGAgent
 from rnr.gym import rnrenvs
 from rnr.movieplot import MoviePlot
@@ -51,10 +53,20 @@ def objective(kwargs):
     gamma=kwargs.get('gamma')
     reg=kwargs.pop('reg')
     epochs=kwargs.pop('epochs')
+    clip_tdq=kwargs.get('clip_tdq',False)
 
     actor, critic = make_models(cluster.env, reg=reg)
     agent = DDPGAgent(cluster, actor, critic, mode=2,**kwargs)
 
+    def qpriority(obs0, a0, r0, obs1, done):
+        tdq = TD_q(agent.target_actor, agent.target_critic, agent.gamma, obs1, r0, done)
+        q0 = agent.target_critic.predict([obs0,a0])
+        if clip_tdq is not None:
+            tdq = np.clip(tdq, clip_tdq / (1 - gamma), 0)
+        epsilon=0.00001
+        priority=np.abs((q0-tdq)/(tdq+epsilon))
+        priority=np.clip(priority,0.0001,1)
+        return priority.squeeze(axis=-1)
     # objgraph.show_growth(1)
     # m=cluster.rollout(policy=agent.target_actor, nepisodes=1)
     # objgraph.show_growth(100)
@@ -66,12 +78,16 @@ def objective(kwargs):
                                                ('ddpg', agent.actor, agent.critic)], title="RL eval",fignum=1))
     callbacks.append(PlotDist(cluster, eval.hist, title="actor/critic training trends",fignum=2))
     #callbacks.append(PltObservation(cluster, agent.target_actor, fignum=3))
-    agent.train(epochs=epochs, fignum=1, visualize=True,callbacks=callbacks)
+    memory = PrioritizedMemory(sz=1000000,updater=qpriority)
+    agent.train(memory=memory,epochs=epochs, fignum=1, visualize=False,callbacks=callbacks)
 
     reward=eval.hist['reward']
     r1=np.array(reward)
     n=min(int(r1.shape[0]*0.2),20) # last 20% or 20 epochs
-    loss= -np.median(r1[-n:]) # median reward of the last nepochs
+    if not np.isnan(r1).any():
+        loss= -np.median(r1[-n:]) # median reward of the last nepochs
+    else:
+        loss=-np.inf
     print("loss={loss:.0f} gamma={gamma:.3f} tau={tau:.3e} lr={lr:.3e} clr={clr:.3e} decay={decay:.3e}".format(loss=loss,**kwargs))
     return {
         'loss': loss,
@@ -84,6 +100,8 @@ def run():
 
     trials = Trials()
     cluster = EnvRollout('Slider-v3', 64)
+    #cluster = EnvRollout('NServoArm-v6', 1)
+
     space = {
             'cluster':cluster,
             'gamma':0.9,
@@ -109,7 +127,7 @@ def run():
             'decay':1e-6,
             'clip_tdq': -10,
             'end_gamma': False,
-            'critic_training_cycles': 10,
+            'critic_training_cycles': 40,
             'batch_size': 32,
             'nfrac':0.1,
          }
