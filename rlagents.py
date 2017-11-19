@@ -56,7 +56,7 @@ class Agent:
 
 
 class DDPGAgent(Agent):
-    def __init__(self,cluster,actor,critic,tau=0.001,gamma=0.99,mode=2,batch_size=32,lr=0.015,decay=1e-5,clr=None,
+    def __init__(self,cluster,actor,critic,tau=0.001,gamma=0.99,mode=2,batch_size=256,lr=0.015,decay=1e-5,clr=None,
                  clip_tdq=True,end_gamma=False,critic_training_cycles=1,verbose=False,nbatches=100,nfrac=0.03):
         super().__init__()
         self.verbose=verbose
@@ -86,7 +86,7 @@ class DDPGAgent(Agent):
         self.critic._make_train_function()
         if self.verbose:
             self.critic.summary()
-        print("DDPG mode {} gamma={:.3e} tau={:.3e} lr={:.3e} clr={:.3e} decay={:.3e} cycles={} bsz={}".format(mode,gamma,tau,lr,clr,decay,
+            print("DDPG mode {} gamma={:.3e} tau={:.3e} lr={:.3e} clr={:.3e} decay={:.3e} cycles={} bsz={}".format(mode,gamma,tau,lr,clr,decay,
                                                                                     self.critic_training_cycles,self.batch_size))
         if self.mode == 1:
             self.actor.compile(optimizer=DDPGof(Adam)(self.critic, self.actor, batch_size=batch_size, lr=self.lr, clipnorm=1., decay=decay),
@@ -101,9 +101,11 @@ class DDPGAgent(Agent):
             self.cgradf = K.function(critic.inputs, cgrad)
             actor.compile(optimizer=Adam(lr=self.lr, clipnorm=1., decay=decay), loss='mse', metrics=['mae', 'acc'])
 
-    def _train(self, memory=None, epochs=100, nepisodes=50, nsteps=None, fignum=None, visualize=False,minsteps=10000):
+    def _train(self, memory=None, epochs=100, nepisodes=None, nsteps=10000, fignum=None, visualize=False,minsteps=10000,updates=False):
         if memory is None:
             memory = ExperienceMemory(sz=1000000)
+        if nepisodes is None:
+            nepisodes = self.cluster.nenv
         if self.verbose:
             print("Train critic")
             self.critic.summary()
@@ -115,7 +117,7 @@ class DDPGAgent(Agent):
                 self.actor.summary()
         # Each environment requires an explorer instance
         explorers = [ OrnstienUhlenbeckExplorer(self.cluster.env.action_space, theta = .15, mu = 0.,nfrac=self.nfrac) for i in range(self.cluster.nenv)]
-        generator=memory.obs1generator(batch_size=self.batch_size,showdone=True)
+        generator = memory.obs1generator(batch_size=self.batch_size, showdone=True)
         #explorers = [None]*self.cluster.nenv
         # sample timing test...
         # 0.1 ms per next(generator)
@@ -137,6 +139,7 @@ class DDPGAgent(Agent):
                         if self.clip_tdq is not None:
                             tdq = np.clip(tdq, self.clip_tdq / (1 - self.gamma), 0)
                         self.critic.train_on_batch([obs0, a0], tdq)
+
                 if not self.freeze_actor:
                     if self.mode==1:
                         self.actor.train_on_batch(obs0, a0)
@@ -158,3 +161,6 @@ class DDPGAgent(Agent):
                                  exploration=explorers,visualize=visualize)
             # print("RL Train {} {:0.3f} sec,  epochs {} of {}".format(self.cluster.envname,
             #     end - start,  self.epoch, epochs))
+            if self.verbose:
+                print(memory.summary())
+
