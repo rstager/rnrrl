@@ -9,14 +9,12 @@ import pickle
 from math import log
 
 import numpy as np
-import objgraph
 from hyperopt import STATUS_OK, Trials, fmin, hp, tpe
 from keras import Input, Model, regularizers
-from keras.layers import Dense, concatenate, Lambda
+from keras.layers import Dense, concatenate
 
-import gym
-from callbacks import ActorCriticEval, PlotDist, PltQEval, PltObservation
-from hindsight import HEREnvRollout
+
+from callbacks import ActorCriticEval, PlotDist, PltQEval
 from rl import EnvRollout, PrioritizedMemory, TD_q
 from rlagents import DDPGAgent
 from rnr.gym import rnrenvs
@@ -44,7 +42,6 @@ def make_models(env,reg=1e-4):
     x = Dense(32, **common_args)(x)
     x = Dense(128, kernel_regularizer=regularizers.l2(reg),**common_args)(x)
     x = Dense(1, activation='linear', name='Q')(x)
-    #x = Lambda(lambda x: x * 10)(x)
     critic = Model([oin, ain], x, name='critic')
     return actor,critic
 
@@ -67,9 +64,6 @@ def objective(kwargs):
         priority=np.abs((q0-tdq)/(tdq+epsilon))
         priority=np.clip(priority,0.0001,1)
         return priority.squeeze(axis=-1)
-    # objgraph.show_growth(1)
-    # m=cluster.rollout(policy=agent.target_actor, nepisodes=1)
-    # objgraph.show_growth(100)
 
     eval=ActorCriticEval(cluster,agent.target_actor,agent.target_critic,gamma)
     callbacks=[]
@@ -77,7 +71,6 @@ def objective(kwargs):
     callbacks.append(PltQEval(cluster, gamma, [('target', agent.target_actor, agent.target_critic),
                                                ('ddpg', agent.actor, agent.critic)], title="RL eval",fignum=1))
     callbacks.append(PlotDist(cluster, eval.hist, title="actor/critic training trends",fignum=2))
-    #callbacks.append(PltObservation(cluster, agent.target_actor, fignum=3))
     memory = PrioritizedMemory(sz=1000000,updater=qpriority)
     agent.train(memory=memory,epochs=epochs, fignum=1, visualize=False,callbacks=callbacks)
 
@@ -100,22 +93,7 @@ def run():
 
     trials = Trials()
     cluster = EnvRollout('Slider-v3', 64)
-    #cluster = EnvRollout('NServoArm-v6', 1)
 
-    space = {
-            'cluster':cluster,
-            'gamma':0.9,
-            'epochs': 200,
-            'tau': hp.lognormal('tau', log(1e-2), 1),
-            'reg':hp.lognormal('reg',log(1e-4),1),
-            'lr':hp.lognormal('lr',log(1e-3),1),
-            'clr': hp.lognormal('clr', log(1e-2), 1),
-            'decay':hp.lognormal('decay',log(1e-6),1),
-            'clip_tdq': hp.choice('clip_tdq',[None,-10]),
-            'end_gamma': False,
-            'critic_training_cycles': hp.randint('critic_training_cycles',10)+1,
-            'batch_size': hp.randint('batch_size', 8)*32+32,
-         }
     space = {
             'cluster':cluster,
             'gamma':0.9,
@@ -131,46 +109,6 @@ def run():
             'batch_size': 32,
             'nfrac':0.1,
          }
-    # space = { #baseline parameters
-    #         #'actor':actor,
-    #         #'critic':critic,
-    #         'cluster':cluster,
-    #         'gamma':0.98,
-    #         'epochs': 100,
-    #         'tau': 0.02,
-    #         'reg':1e-4,
-    #         'lr':0.005,
-    #         'clr': 0.05,
-    #         'decay':0.0005,
-    #     }
-    # space = {
-    #         #'actor':actor,
-    #         #'critic':critic,
-    #         'cluster':cluster,
-    #         'gamma':0.98,
-    #         'epochs': 5000,
-    #         'tau': 0.002,
-    #         'reg':1e-4,
-    #         'lr':0.0005,
-    #         'clr': 0.005,
-    #         'decay':0.0005,
-    #         'clip_tdq':True,
-    #         'end_gamma':False,
-    #         'critic_training_cycles':40,
-    #         'batch_size':128,
-    #     }
-    # space = {  # camigord parameter settings
-    #         #'actor':actor,
-    #         #'critic':critic,
-    #         'cluster':cluster,
-    #         'gamma':0.98,
-    #         'epochs': 100,
-    #         'tau': 0.001,
-    #         'reg':1e-4,
-    #         'lr':0.0001,
-    #         'clr': 0.001,
-    #         'decay':0.0005,
-    #     }
 
 
     movie = MoviePlot("RL", path='experiments/latest')
@@ -182,8 +120,6 @@ def run():
         trials=trials)
     movie.finish()
     print(best)
-    with open('trials.p','wb') as f:
-        pickle.dump(trials,f)
 
 if __name__ == "__main__":
     run()
