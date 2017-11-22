@@ -57,7 +57,7 @@ class Agent:
 
 class DDPGAgent(Agent):
     def __init__(self,cluster,actor,critic,tau=0.001,gamma=0.99,mode=2,batch_size=256,lr=0.015,decay=1e-5,clr=None,
-                 clip_tdq=True,end_gamma=False,critic_training_cycles=1,verbose=False,nbatches=100,nfrac=0.03):
+                 clip_tdq=None,end_gamma=False,critic_training_cycles=1,verbose=False,nbatches=100,nfrac=0.03):
         super().__init__()
         self.verbose=verbose
         self.cluster=cluster
@@ -103,9 +103,9 @@ class DDPGAgent(Agent):
 
     def _train(self, memory=None, epochs=100, nepisodes=None, nsteps=10000, fignum=None, visualize=False,minsteps=10000,updates=False):
         if memory is None:
-            memory = ExperienceMemory(sz=1000000)
-        if nepisodes is None:
-            nepisodes = self.cluster.nenv
+            memory = ExperienceMemory(env=self.cluster.env,sz=1000000)
+        #if nepisodes is None:
+        #    nepisodes = self.cluster.nenv
         if self.verbose:
             print("Train critic")
             self.critic.summary()
