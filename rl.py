@@ -1,6 +1,7 @@
 from collections import namedtuple
 import random
 import numpy as np
+from multiprocessing import Process, Queue
 
 import gym
 
@@ -30,7 +31,8 @@ class ExperienceMemory():
                     self.episodes.append(-1)
                 self.episodes[self.eidx]=ridx
 
-    def __init__(self,sz=100000):
+    def __init__(self,env=None,sz=100000):
+        assert env != None,"New API for ExperienceMemory requires env=<env>"
         self.sz=sz
         self.didx=-1
         self.buffer=[]
@@ -39,6 +41,12 @@ class ExperienceMemory():
         self.reads = 0
         self.wdones = 0
         self.rdones = 0
+        if hasattr(env.observation_space,'spaces'):
+            self.obs_list=True
+            self.obs_shapes=[x.shape for x in env.observation_space.spaces]
+        else:
+            self.obs_list=False
+            self.obs_shape=env.observation_space.shape
 
     def summary(self):
         return "writes {} dones {} sampled reads {} dones {}".format(self.writes, self.wdones, self.reads,
@@ -98,19 +106,30 @@ class ExperienceMemory():
 
     def _np_experience(self,idxs,terminus=False): # terminus includes the observation after the done
         batchsz=len(idxs)+(1 if terminus else 0)
-        Sobs = np.empty((batchsz,) + self.buffer[idxs[0]].obs1.shape)
+        if self.obs_list:
+            Sobs = [np.empty((batchsz,) + shape) for shape in self.obs_shapes]
+        else:
+            Sobs = np.empty((batchsz,) + self.obs_shape)
         Saction=np.empty((batchsz,) + self.buffer[idxs[0]].action.shape)
         Sreward=np.empty((batchsz,1))
         Sdone=np.empty((batchsz,1))
         for idx, s in enumerate(idxs):
             assert self.buffer[s].metadata.prev != -1
-            Sobs[idx]=self.buffer[self.buffer[s].metadata.prev].obs1
+            if self.obs_list:
+                for col, obs1 in zip(Sobs,self.buffer[self.buffer[s].metadata.prev].obs1):
+                    col[idx]=obs1
+            else:
+                Sobs[idx]=self.buffer[self.buffer[s].metadata.prev].obs1
             Saction[idx]=self.buffer[s].action
             Sreward[idx]=self.buffer[s].reward
             Sdone[idx]=self.buffer[s].done
 
         if terminus:
-            Sobs[-1]=self.buffer[idxs[-1]].obs1
+            if self.obs_list:
+                for col, obs1 in zip(Sobs,self.buffer[self.buffer[s].metadata.prev].obs1):
+                    col[-1]=obs1
+            else:
+                Sobs[-1] = self.buffer[idxs[-1]].obs1
             Saction[-1]=None
             Sreward[-1]=None
             Sdone[-1]=None
@@ -119,8 +138,12 @@ class ExperienceMemory():
     def obs1generator(self,batch_size=32,showdone=False,sample=None,indexes=[]):
         assert len(self.buffer) > 0
         while True:
-            obs0 = []
-            obs1 = []
+            if self.obs_list:
+                obs0 =[[] for i in self.obs_shapes]
+                obs1 =[[] for i in self.obs_shapes]
+            else:
+                obs0 = []
+                obs1 = []
             a0=[]
             r0=[]
             done=[]
@@ -137,15 +160,25 @@ class ExperienceMemory():
                 if r.metadata.prev != -1: #sample is not the reset
                     pr = self.buffer[r.metadata.prev]
                     a0.append(r.action)
-                    obs1.append(r.obs1)
+                    if self.obs_list:
+                        for col,value in zip(obs0,pr.obs1):
+                            col.append(value)
+                        for col,value in zip(obs1,r.obs1):
+                            col.append(value)
+                    else:
+                        obs1.append(r.obs1)
+                        obs0.append(pr.obs1)
                     r0.append(r.reward)
                     done.append(r.done)
-                    obs0.append(pr.obs1)
+
                     self.reads += 1
                     if r.done:
                         self.rdones+=1
+            if self.obs_list:
+                yield [np.array(col) for col in obs0], np.array(a0), np.expand_dims(np.array(r0), axis=-1), [np.array(col) for col in obs0], np.expand_dims(np.array(done), axis=-1)
 
-            yield np.array(obs0),np.array(a0),np.expand_dims(np.array(r0),axis=-1),np.array(obs1),np.expand_dims(np.array(done),axis=-1)
+            else:
+                yield np.array(obs0),np.array(a0),np.expand_dims(np.array(r0),axis=-1),np.array(obs1),np.expand_dims(np.array(done),axis=-1)
 
 
     def save(self,filename):
@@ -157,8 +190,8 @@ class ExperienceMemory():
         return pickle.load( open(filename, "rb"))
 
 class PrioritizedMemory(ExperienceMemory):
-    def __init__(self,max_priority=1,sz=10000,alpha=1,updater=None):
-        super().__init__(sz)
+    def __init__(self,max_priority=1,sz=10000,alpha=1,updater=None,**kwargs):
+        super().__init__(sz=sz,**kwargs)
         self._max_priority=max_priority
         self._alpha=alpha
         sz2=2**np.math.ceil(np.math.log(sz, 2))
@@ -167,7 +200,7 @@ class PrioritizedMemory(ExperienceMemory):
         self.updater=updater
 
     def summary(self):
-        return "{} {}".format(super().summary(),self._it_sum.sum()/self.nb_entries)
+        return "{} avg pri {}".format(super().summary(),self._it_sum.sum()/self.nb_entries)
 
     def _record(self, action, obs1, reward, done, md):
         md, ridx= super()._record(action,obs1,reward,done,md)
@@ -206,7 +239,7 @@ def discounted_future(reward,gamma,done=True):
         return df
 
 def TD_q(target_actor, target_critic, gamma, obs1, r0, done,end_gamma=False):
-    assert obs1.shape[0]==r0.shape[0],"Observation and reward sizes must match"
+    #assert obs1.shape[0]==r0.shape[0],"Observation and reward sizes must match"
     assert r0.shape[-1]==1 and done.shape[-1]==1,"Reward and done have shape [None,1]"
     a1 = target_actor.predict([obs1])
     q1 = target_critic.predict([obs1, a1])
@@ -236,7 +269,7 @@ class EnvRollout:
         step_cnt,episode_cnt=0,0
         env_nsteps=[0]*self.nenv
         if memory is None:
-            memory=ExperienceMemory()
+            memory=ExperienceMemory(env=self.env)
         n= nepisodes if nepisodes is not None and nepisodes<len(self._instances) else len(self._instances)
         for env in self._instances[:n]:
             recorders.append(memory.recorder(episodes))
@@ -281,3 +314,4 @@ class EnvRollout:
                 if nsteps is not None and step_cnt>=nsteps:
                     break
         return memory
+
