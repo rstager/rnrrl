@@ -229,6 +229,8 @@ class PrioritizedMemory(ExperienceMemory):
         idx = self._it_sum.find_prefixsum_idx(mass)
         return idx
 
+def q_delta(q, gamma):
+    return q[:-1] - gamma * q[1:]
 
 def discounted_future(reward,gamma,done=True):
         df=np.copy(reward)
