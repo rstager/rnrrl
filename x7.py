@@ -3,6 +3,8 @@ Test slider with a complex reward function
 '''
 import functools
 
+from tensorflow.python.layers.normalization import BatchNorm
+
 import gym
 from gym import spaces
 from rnr.slider import SliderEnv
@@ -20,8 +22,7 @@ from math import log, cos, sin, sqrt
 import numpy as np
 from hyperopt import STATUS_OK, Trials, fmin, hp, tpe
 from keras import Input, Model, regularizers
-from keras.layers import Dense, concatenate
-
+from keras.layers import Dense, concatenate, Activation, BatchNormalization
 
 from callbacks import ActorCriticEval, PlotDist, PltQEval, SaveModel
 from rl import EnvRollout, PrioritizedMemory, TD_q
@@ -36,20 +37,33 @@ def make_models(env,reg=1e-4):
     ain = Input(shape=env.action_space.shape, name='action')
     oin = Input(shape=env.observation_space.shape, name='observeration')  # full observation
     common_args = kwargs(kernel_initializer='glorot_normal',
-                         activation='relu',
+                         #activation='relu',
                          #bias_initializer = 'zeros',
                          )
     x = oin
     x = Dense(64, **common_args)(x)
+    #x = BatchNormalization()(x)
+    x = Activation('relu')(x)
     x = Dense(128, **common_args, kernel_regularizer=regularizers.l2(reg))(x)
+    #x = BatchNormalization()(x)
+    x = Activation('relu')(x)
     x = Dense(128, **common_args, kernel_regularizer=regularizers.l2(reg))(x)
+    #x = BatchNormalization()(x)
+    x = Activation('relu')(x)
     x = Dense(env.action_space.shape[0], activation='tanh',kernel_initializer='glorot_normal')(x)
     actor = Model(oin, x, name='actor')
 
     x = oin
     x = concatenate([x, ain], name='sensor_goal_action')
     x = Dense(32, **common_args)(x)
+    #x = BatchNormalization()(x)
+    x = Activation('relu')(x)
+    x = Dense(32, **common_args)(x)
+    #x = BatchNormalization()(x)
+    x = Activation('relu')(x)
     x = Dense(128, kernel_regularizer=regularizers.l2(reg),**common_args)(x)
+    #x = BatchNormalization()(x)
+    x = Activation('relu')(x)
     x = Dense(1, activation='linear', name='Q')(x)
     critic = Model([oin, ain], x, name='critic')
     return actor,critic
@@ -118,12 +132,21 @@ class ComplexSliderEnv(SliderEnv):
 
     def _step(self,u):
         obs,reward,done,info=super()._step(u)
-        tip=self._angles_to_coord(obs[:self.ndim]*np.pi)
-        newgoal=self._angles_to_coord(obs[2*self.ndim:3*self.ndim]*np.pi)
+        #tip=self._angles_to_coord(obs[:self.ndim]*np.pi)
+        #newgoal=self._angles_to_coord(obs[2*self.ndim:3*self.ndim]*np.pi)
         assert self.ndim==2
+        obs=super()._get_obs()
         newobs=self._get_obs()
         #newreward=-2*(obs[0]-obs[4])**2-2*(obs[1]-obs[5])**2
-        newreward= -2*((obs[4]*sin(obs[5])-obs[0]*sin(obs[1]))**2+(obs[4]*cos(obs[5])-obs[0]*cos(obs[1]))**2)
+        #newreward= -2*((obs[4]*sin(obs[5])-obs[0]*sin(obs[1]))**2+(obs[4]*cos(obs[5])-obs[0]*cos(obs[1]))**2)
+        x,y=self.__xyof(obs[0:2])
+        xg,yg=self.__xyof(obs[4:6])
+        d=sqrt((x-xg)**2+(y-yg)**2)
+        newreward= -0.5*(d**2)
+        if d<0.1: #override the done. There may be multiple solutions that get close enough to the goal.
+            done=True
+        if done:
+            print("x,y={} {}, goal={} {}, d={} obs {} newobs {}".format(x,y,xg,yg,newreward,obs,newobs))
         newreward+=-0.1*(obs[2]**2 + obs[3]**2) -0.01*(u[0]**2+u[1]**2)-1
         #newreward=-2*(obs[0]-obs[4])**2-2*(obs[1]-obs[5])**2 -0.1*(obs[2]**2 + obs[3]**2) -0.01*(u[0]**2+u[1]**2)-1
         #newreward=reward
@@ -145,13 +168,20 @@ class ComplexSliderEnv(SliderEnv):
         return self._get_obs()
 
     def set_state(self,state):
-        obs=super().set_state(state)
+        super().set_state(state)
         return self._get_obs()
 
     def _get_obs(self):
         obs=super()._get_obs()
-        newobs=np.array([obs[0],obs[1],obs[2],obs[3],obs[4]*sin(obs[5]),obs[4]*cos(obs[5])])
+        newobs=np.array([obs[0],obs[1],obs[2],obs[3],*self.__xyof(obs[4:6])])
         return newobs
+
+    def __xyof(self,obs):
+        #x=obs[0]*cos(obs[1])
+        #y=obs[0]*sin(obs[1])
+        x=cos(obs[0])+cos(obs[1])
+        y=sin(obs[0])+sin(obs[1])
+        return x,y
 
 def make_env(cls,*args,**kwargs):
     return cls(*args,**kwargs)
@@ -174,16 +204,16 @@ def run():
     space = {
             'cluster':cluster,
             'gamma':0.9,
-            'epochs': 200,
+            'epochs': 2000,
             'tau': 1e-2,
             'reg':1e-4,
             'lr':1e-3,
             'clr':1e-2,
             'decay':1e-6,
-            'clip_tdq': -10,
+            'clip_tdq': -30,
             'end_gamma': False,
-            'critic_training_cycles': 40,
-            'batch_size': 32,
+            'critic_training_cycles':5,
+            'batch_size': 256,
             'nfrac':0.1,
          }
 
