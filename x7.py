@@ -24,7 +24,7 @@ from hyperopt import STATUS_OK, Trials, fmin, hp, tpe
 from keras import Input, Model, regularizers
 from keras.layers import Dense, concatenate, Activation, BatchNormalization
 
-from callbacks import ActorCriticEval, PlotDist, PltQEval, SaveModel
+from callbacks import ActorCriticEval, PlotDist, PltQEval, SaveModel, PltObservation, ActorCriticRollout, PltQEval2
 from rl import EnvRollout, PrioritizedMemory, TD_q
 from rlagents import DDPGAgent
 from rnr.gym import rnrenvs
@@ -91,9 +91,12 @@ def objective(kwargs):
     eval=ActorCriticEval(cluster,agent.target_actor,agent.target_critic,gamma)
     callbacks=[]
     callbacks.append(eval)
-    callbacks.append(PltQEval(cluster, gamma, [('target', agent.target_actor, agent.target_critic),
-                                               ('ddpg', agent.actor, agent.critic)], title="RL eval",fignum=1))
-    callbacks.append(PlotDist(cluster, eval.hist, title="actor/critic training trends",fignum=2))
+    # callbacks.append(PltQEval(cluster, gamma, [('target', agent.target_actor, agent.target_critic),
+    #                                            ('ddpg', agent.actor, agent.critic)], title="RL eval",fignum=1))
+    callbacks.append(PlotDist(cluster, eval.hist, title="actor/critic training trends",fignum=1))
+    callbacks.append(ActorCriticRollout(cluster,agent.target_actor,agent.target_critic,
+                                        [PltObservation(cluster.env, fignum=2),
+                                         PltQEval2(cluster.env,gamma,fignum=3)]))
     callbacks.append(SaveModel(agent.target_actor,agent.target_critic,skip=10))
     memory = PrioritizedMemory(sz=100000,env=cluster.env,updater=qpriority)
     agent.train(memory=memory,epochs=epochs, fignum=1, visualize=False,callbacks=callbacks,nsteps=1000)
@@ -116,7 +119,8 @@ class ComplexSliderEnv(SliderEnv):
         super().__init__(*args,**kwargs)
         self.ndim=kwargs.get('ndim',1)
         self.links=[1.0,0.7,0.3]
-        self.observation_space= spaces.Box(low=np.array([0,0,-1,-1,-1,-1]),high=np.array([1,1,1,1,1,1]))
+        self.observation_space = spaces.Box(low=np.array([0]*self.ndim+[-1]*self.ndim+[-self.ndim,-self.ndim]),
+                                           high=np.array([1]*self.ndim+[1]*self.ndim+[self.ndim,self.ndim]))
 
     def _angles_to_coord(self,angles):
         # simulate nservo reward
@@ -132,37 +136,21 @@ class ComplexSliderEnv(SliderEnv):
 
     def _step(self,u):
         obs,reward,done,info=super()._step(u)
-        #tip=self._angles_to_coord(obs[:self.ndim]*np.pi)
-        #newgoal=self._angles_to_coord(obs[2*self.ndim:3*self.ndim]*np.pi)
-        assert self.ndim==2
         obs=super()._get_obs()
         newobs=self._get_obs()
-        #newreward=-2*(obs[0]-obs[4])**2-2*(obs[1]-obs[5])**2
-        #newreward= -2*((obs[4]*sin(obs[5])-obs[0]*sin(obs[1]))**2+(obs[4]*cos(obs[5])-obs[0]*cos(obs[1]))**2)
-        x,y=self.__xyof(obs[0:2])
-        xg,yg=self.__xyof(obs[4:6])
-        d=sqrt((x-xg)**2+(y-yg)**2)
+        #tip=self._angles_to_coord(obs[:self.ndim]*np.pi)
+        #newgoal=self._angles_to_coord(obs[2*self.ndim:3*self.ndim]*np.pi)
+        tip=self.__a2loc(obs[0:self.ndim])
+        goal=self.__a2loc(obs[2 * self.ndim:3 * self.ndim])
+        d=np.sum(np.sqrt(np.square(tip-goal)))
         newreward= -0.5*(d**2)
         if d<0.1: #override the done. There may be multiple solutions that get close enough to the goal.
             done=True
         if done:
-            print("x,y={} {}, goal={} {}, d={} obs {} newobs {}".format(x,y,xg,yg,newreward,obs,newobs))
-        newreward+=-0.1*(obs[2]**2 + obs[3]**2) -0.01*(u[0]**2+u[1]**2)-1
-        #newreward=-2*(obs[0]-obs[4])**2-2*(obs[1]-obs[5])**2 -0.1*(obs[2]**2 + obs[3]**2) -0.01*(u[0]**2+u[1]**2)-1
-        #newreward=reward
-        #reward= -np.sum(error**2+0.1*self.v**2+0.01*u[0]**2) - 1.0
-
-
-        #print("x/cos {} g {} {} reward {}".format(obs[0],obs[2],cos(obs[0]-obs[2]),reward))
+            print("tip={}, goal={}, d={} obs {} newobs {}".format(tip,goal,newreward,obs,newobs))
+        newreward+=-0.1*(np.sum(np.square(np.array(obs[self.ndim:self.ndim*2])))) -0.01*(np.sum(np.square(u)))-1
         return newobs,newreward,done,info # original solution
-        d2 = np.sum(np.square(np.array(tip[:self.ndim])-np.array(newgoal[:self.ndim])))
-        new_reward = -d2 - 1
-        new_reward /= 4*sum(self.links[:self.ndim])**2
-        obs[2*self.ndim:3*self.ndim]=newgoal[:self.ndim]
-        #reward = -((angles[0]-goalx[0])**2 +(angles[1]-goalx[1])**2 +(angles[2]-goalx[2])**2)
-        #reward = -(sin(angles[0] - goalx[0])**2+sin(angles[1] - goalx[1]) ** 2 + sin(angles[2] - goalx[2]) ** 2)-1
 
-        return obs,new_reward,done,info
     def _reset(self):
         super()._reset()
         return self._get_obs()
@@ -173,15 +161,16 @@ class ComplexSliderEnv(SliderEnv):
 
     def _get_obs(self):
         obs=super()._get_obs()
-        newobs=np.array([obs[0],obs[1],obs[2],obs[3],*self.__xyof(obs[4:6])])
+        newobs=np.array(list(obs[0:2*self.ndim])+list(self.__a2loc(obs[2*self.ndim:])))
         return newobs
 
-    def __xyof(self,obs):
-        #x=obs[0]*cos(obs[1])
-        #y=obs[0]*sin(obs[1])
-        x=cos(obs[0])+cos(obs[1])
-        y=sin(obs[0])+sin(obs[1])
-        return x,y
+    def __a2loc(self, obs):
+        # for i in range(1,len(obs)):
+        #     obs[i]+=obs[i-1]
+        # x=np.sum(np.cos(obs))
+        # y=np.sum(np.sin(obs))
+        x,y,_=self._angles_to_coord(obs)
+        return np.array([x,y])
 
 def make_env(cls,*args,**kwargs):
     return cls(*args,**kwargs)
@@ -191,7 +180,7 @@ def run():
     rnrenvs()
 
     trials = Trials()
-    kwargs={'ndim':2,'minx':0} #,'image_goal':[40,40]}
+    kwargs={'ndim':3,'minx':0} #,'image_goal':[40,40]}
 
     gym.envs.register(
         id='Test-v0',
