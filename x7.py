@@ -119,8 +119,9 @@ class ComplexSliderEnv(SliderEnv):
         super().__init__(*args,**kwargs)
         self.ndim=kwargs.get('ndim',1)
         self.links=[1.0,0.7,0.3]
-        self.observation_space = spaces.Box(low=np.array([0]*self.ndim+[-1]*self.ndim+[-self.ndim,-self.ndim]),
-                                           high=np.array([1]*self.ndim+[1]*self.ndim+[self.ndim,self.ndim]))
+        ospace=2 if self.ndim!=3 else 3
+        self.observation_space = spaces.Box(low=np.array([0]*self.ndim+[-1]*self.ndim+[-self.ndim]*ospace),
+                                           high=np.array([1]*self.ndim+[1]*self.ndim+[self.ndim]*ospace))
 
     def _angles_to_coord(self,angles):
         # simulate nservo reward
@@ -128,11 +129,14 @@ class ComplexSliderEnv(SliderEnv):
         ys = [0]
         ts = [np.pi / 2]  # zero is straight up
         for i, l in enumerate(self.links[:self.ndim]):
-            ts.append(ts[-1] + angles[i])
+            ts.append(ts[-1] + angles[i]*np.pi)
             xs.append(xs[-1] + l * cos(ts[-1]))
             ys.append(ys[-1] + l * sin(ts[-1]))
         del ts[0]
-        return [xs[-1],ys[-1],ts[-1]]
+        if self.ndim==3:
+            return np.array([xs[-1],ys[-1],ts[-1]])
+        else:
+            return np.array([xs[-1], ys[-1]])
 
     def _step(self,u):
         obs,reward,done,info=super()._step(u)
@@ -140,15 +144,19 @@ class ComplexSliderEnv(SliderEnv):
         newobs=self._get_obs()
         #tip=self._angles_to_coord(obs[:self.ndim]*np.pi)
         #newgoal=self._angles_to_coord(obs[2*self.ndim:3*self.ndim]*np.pi)
-        tip=self.__a2loc(obs[0:self.ndim])
-        goal=self.__a2loc(obs[2 * self.ndim:3 * self.ndim])
-        d=np.sum(np.sqrt(np.square(tip-goal)))
+        tip=self._angles_to_coord(obs[0:self.ndim])
+        goal=self._angles_to_coord(obs[2 * self.ndim:3 * self.ndim])
+        d=np.sqrt(np.sum(np.square(tip[:2]-goal[:2])))
         newreward= -0.5*(d**2)
+        if self.ndim==3:
+            newreward+= -0.1*(sin((tip[-1]-goal[-1])*np.pi)**2)
+        # if self.hit_limit:
+        #     newreward-=5
         if d<0.1: #override the done. There may be multiple solutions that get close enough to the goal.
             done=True
         if done:
             print("tip={}, goal={}, d={} obs {} newobs {}".format(tip,goal,newreward,obs,newobs))
-        newreward+=-0.1*(np.sum(np.square(np.array(obs[self.ndim:self.ndim*2])))) -0.01*(np.sum(np.square(u)))-1
+        newreward+=-0.1*(np.sum(np.square(np.array(obs[self.ndim:self.ndim*2])))) -0.1*(np.sum(np.square(u)))-1
         return newobs,newreward,done,info # original solution
 
     def _reset(self):
@@ -161,16 +169,38 @@ class ComplexSliderEnv(SliderEnv):
 
     def _get_obs(self):
         obs=super()._get_obs()
-        newobs=np.array(list(obs[0:2*self.ndim])+list(self.__a2loc(obs[2*self.ndim:])))
+        newobs=np.array(list(obs[0:2*self.ndim])+list(self._angles_to_coord(obs[2*self.ndim:])))
         return newobs
 
-    def __a2loc(self, obs):
-        # for i in range(1,len(obs)):
-        #     obs[i]+=obs[i-1]
-        # x=np.sum(np.cos(obs))
-        # y=np.sum(np.sin(obs))
-        x,y,_=self._angles_to_coord(obs)
-        return np.array([x,y])
+    def _render(self, mode='human', close=False):
+        if self.viewer is None:
+            ret=super()._render(mode,close)
+            sz=2
+            self.viewer.set_bounds(-sz, sz, -sz, sz)
+        if not close:
+            obs = super()._get_obs()
+            tip = self._angles_to_coord(obs[0:self.ndim])
+            goal = self._angles_to_coord(obs[2 * self.ndim:3 * self.ndim])
+
+            if self.ndim ==1:
+                self.goal_transform.set_translation(goal[0],0)
+                self.puck_transform.set_translation(tip[0],0)
+            elif self.ndim >1:
+                self.goal_transform.set_translation(goal[0], goal[1])
+                self.puck_transform.set_translation(tip[0], tip[1])
+            if self.ndim == 3:
+                self.goal_transform.set_rotation(goal[2]*np.pi)
+                self.puck_transform.set_rotation(tip[2]*np.pi)
+
+            if self.done:
+                self.goal.set_color(0,1, 0)
+            else:
+                self.goal.set_color(1,0, 0)
+
+            return self.viewer.render(return_rgb_array = mode=='rgb_array')
+        else:
+            return ret
+
 
 def make_env(cls,*args,**kwargs):
     return cls(*args,**kwargs)
@@ -180,7 +210,7 @@ def run():
     rnrenvs()
 
     trials = Trials()
-    kwargs={'ndim':3,'minx':0} #,'image_goal':[40,40]}
+    kwargs={'ndim':2,'minx':0,'maxx':1,'wrap':False} #,'image_goal':[40,40]}
 
     gym.envs.register(
         id='Test-v0',
@@ -199,7 +229,7 @@ def run():
             'lr':1e-3,
             'clr':1e-2,
             'decay':1e-6,
-            'clip_tdq': -30,
+            'clip_tdq': -90,
             'end_gamma': False,
             'critic_training_cycles':5,
             'batch_size': 256,
