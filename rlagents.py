@@ -71,8 +71,7 @@ class DDPGAgent(Agent):
         self.critic=critic
         self.batch_size=batch_size
         self.lrdecay_interval=100
-        self.lr=lr
-        self.clr=clr if clr is not None else lr
+        clr=clr if clr is not None else lr
         self.nbatches=nbatches
         self.freeze_critic=False
         self.freeze_actor=False
@@ -82,24 +81,44 @@ class DDPGAgent(Agent):
         self.nfrac=nfrac
 
         self.critic.trainable = True
-        self.critic.compile(optimizer=Adam(lr=self.clr, clipnorm=1., decay=decay), loss='mse', metrics=['mae', 'acc'])
+        self.critic.compile(optimizer=Adam(lr=clr, clipnorm=1., decay=decay), loss='mse', metrics=['mae', 'acc'])
         self.critic._make_train_function()
         if self.verbose:
             self.critic.summary()
             print("DDPG mode {} gamma={:.3e} tau={:.3e} lr={:.3e} clr={:.3e} decay={:.3e} cycles={} bsz={}".format(mode,gamma,tau,lr,clr,decay,
                                                                                     self.critic_training_cycles,self.batch_size))
         if self.mode == 1:
-            self.actor.compile(optimizer=DDPGof(Adam)(self.critic, self.actor, batch_size=batch_size, lr=self.lr, clipnorm=1., decay=decay),
+            self.actor.compile(optimizer=DDPGof(Adam)(self.critic, self.actor, batch_size=batch_size, lr=lr, clipnorm=1., decay=decay),
                           loss='mse', metrics=['mae', 'acc'])
         elif self.mode == 2:
             self.combined = Model([actor.input], critic([actor.input, actor.output]))
             self.combined.layers[-1].trainable = False
-            self.combined.compile(optimizer=Adam(lr=self.lr, clipnorm=1., decay=decay), loss='mse',  metrics=['mae', 'acc'])
+            self.combined.compile(optimizer=Adam(lr=lr, clipnorm=1., decay=decay), loss='mse',  metrics=['mae', 'acc'])
             self.combined._make_train_function()
         else:
             cgrad = K.gradients(critic.outputs, critic.inputs[1])  # grad of Q wrt actions
             self.cgradf = K.function(critic.inputs, cgrad)
-            actor.compile(optimizer=Adam(lr=self.lr, clipnorm=1., decay=decay), loss='mse', metrics=['mae', 'acc'])
+            actor.compile(optimizer=Adam(lr=lr, clipnorm=1., decay=decay), loss='mse', metrics=['mae', 'acc'])
+
+    #lr and clr are stored in the models
+    @property
+    def lr(self):
+        if self.mode != 2:
+            return K.get_value(self.actor.optimizer.lre)
+        else:
+            return K.get_value(self.combined.optimizer.lr)
+    @lr.setter
+    def lr(self, value):
+        if self.mode != 2:
+            K.set_value(self.actor.optimizer.lr, value)
+        else:
+            K.set_value(self.combined.optimizer.lr,value)
+    @property
+    def clr(self):
+        return K.get_value(self.critic.optimizer.lr)
+    @clr.setter
+    def clr(self, value):
+        K.set_value(self.critic.optimizer.lr, value)
 
     def _train(self, memory=None, epochs=100, nepisodes=None, nsteps=10000, fignum=None, visualize=False,minsteps=10000,updates=False):
         if memory is None:
@@ -161,6 +180,7 @@ class DDPGAgent(Agent):
                                  exploration=explorers,visualize=visualize)
             # print("RL Train {} {:0.3f} sec,  epochs {} of {}".format(self.cluster.envname,
             #     end - start,  self.epoch, epochs))
-            if self.verbose:
-                print(memory.summary())
+            #if self.verbose:
+            print("epoch {} tau {} gamma {} lr {} clr {}".format(i_epoch,self.tau,self.gamma,self.lr,self.clr))
+            print(memory.summary())
 
