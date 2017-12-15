@@ -4,6 +4,7 @@ import numpy as np
 from multiprocessing import Process, Queue
 
 import gym
+from gym.envs.registration import EnvSpec
 
 from rnr.segment_tree import SumSegmentTree
 
@@ -229,14 +230,24 @@ class PrioritizedMemory(ExperienceMemory):
         idx = self._it_sum.find_prefixsum_idx(mass)
         return idx
 
+gamma_normalized=True
 def q_delta(q, gamma):
-    return q[:-1] - gamma * q[1:]
+    if gamma_normalized:
+        return (q[:-1] - gamma * q[1:])/(1-gamma)
+    else:
+        return q[:-1] - gamma * q[1:]
 
 def discounted_future(reward,gamma,done=True):
         df=np.copy(reward)
-        last = reward[-1]/(1-gamma) if not done else 0
+        if gamma_normalized:
+            last = reward[-1] if not done else 0
+        else:
+            last = reward[-1] / (1 - gamma) if not done else 0
         for i in reversed(range(df.shape[0])):
-            df[i] += gamma * last
+            if gamma_normalized:
+                df[i] =df[i]*(1-gamma)+gamma * last
+            else:
+                df[i] += gamma * last
             last = df[i]
         return df
 
@@ -252,7 +263,10 @@ def TD_q(target_actor, target_critic, gamma, obs1, r0, done,end_gamma=False):
         n=np.select([s], [gamma * np.array(q1)], 0)
     #
     # print("n mean={}".format(np.mean(n)))
-    qt = r0 + n
+    if gamma_normalized:
+        qt = r0*(1-gamma) + n
+    else:
+        qt = r0 + n
     # print("TD_q obs1 {} r0 {} done {} n {} qt {}".format(obs1.shape,r0.shape,done.shape,n.shape,qt.shape))
     return qt
 
