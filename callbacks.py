@@ -10,23 +10,28 @@ import numpy as np
 
 from rnr.util import rms
 from matplotlib import pyplot as plt
+import keras.backend as K
 
-
+# gamma can be a gamma value or an object with a gamma attribute
 class ActorCriticEval(Callback):
-    def __init__(self,cluster,actor,critic,gamma,visualize=False,nepisodes=64):
+    def __init__(self,cluster,actor,critic,gamma,visualize=False,nepisodes=64,skip=1):
         self.cluster=cluster
         self.actor=actor
         self.critic=critic
         self.gamma=gamma
         self.visualize=visualize
         self.nepisodes=nepisodes
+        self.skip=skip
         self.hist=OrderedDict()
         self.hist["reward"]=[]
         self.hist["steps"]=[]
         self.hist["qvar"]=[]
         self.hist["qbias"]=[]
 
+
     def on_epoch_end(self, epoch, logs):
+        if epoch % self.skip != 0:
+            return
         # roll out some on policy episodes so we can see the results
         evalmemory = ExperienceMemory(env=self.cluster.env,sz=100000)
         episodes=[]
@@ -35,11 +40,12 @@ class ActorCriticEval(Callback):
         qvar, qbias = [], []
         episode_rewards = []
         episode_duration = []
+        gamma = self.gamma.gamma if hasattr(self.gamma,'gamma') else self.gamma
         for obs0, a0, r0, done in evalmemory.episodes(episodes):
             episode_rewards.append(np.sum(r0))
             episode_duration.append(r0.shape[0])
             q = self.critic.predict([obs0, a0])
-            dfr = discounted_future(r0, self.gamma,done[-1])
+            dfr = discounted_future(r0, gamma,done[-1])
             qe=q-dfr
             qbias.append(np.mean(qe))
             qvar.append(np.std(qe))
@@ -54,35 +60,50 @@ class ActorCriticEval(Callback):
         pass
 
 class PlotDist(Callback):
-    def __init__(self, cluster, dists, title="", fignum=None, skip=1):
+    def __init__(self, cluster, dists, title="", fignum=None, skip=1,verbose=False):
+        self.env=cluster.env
         self.title = title
         self.fignum = plt.figure(fignum).number
         self.dists = dists
         self.skip = skip
+        self.verbose=verbose
         self.stats = OrderedDict()
         for name,value in self.dists.items():
             self.stats[name]=[[],[]]
+        self.lastt=0
 
     def on_epoch_end(self, epoch, logs):
         for name,value in self.dists.items():
             self.stats[name][0].append(np.mean(value[-1]))
             self.stats[name][1].append(np.std(value[-1]))
+            if self.verbose:
+                print("{} {:0.3f} +/- {:0.3f}".format(name,self.stats[name][0][-1],self.stats[name][1][-1]), end=' ')
+        if self.verbose:
+            print()
+        t = time.perf_counter()
+        tdiff = t - self.lastt
+        self.lastt = t
         if epoch % self.skip != 0:
             return
         plt.figure(self.fignum)
         plt.clf()
-        plt.suptitle(self.title + " epoch {}".format(epoch))
+        plt.suptitle(self.title + " {} epoch {} in {:.3f} sec".format(self.env.spec.id, epoch, tdiff))
         plotdict(plt,self.stats,plotter=plotmeanstd)
         plt.pause(0.001)
 
+
 class ActorCriticSeriesRollout(Callback):
-    def __init__(self, cluster, series, callbacks=None, nepisodes=1):
+    def __init__(self, cluster, series, callbacks=None, nepisodes=1,visualize=False,skip=1,verbose=False):
         self.cluster=cluster
         self.series=series
         self.callbacks=callbacks
         self.nepisodes=1
+        self.visualize=visualize
+        self.skip=skip
 
     def on_epoch_end(self, epoch, logs):
+        if epoch % self.skip != 0:
+            return
         self.cluster.env.env.reset()
         assert hasattr(self.cluster.env.env, 'get_state'), "SeriesRollout requires environment have get/set_state"
         start_state = self.cluster.env.env.get_state()
@@ -91,7 +112,8 @@ class ActorCriticSeriesRollout(Callback):
         for idx, (name, actor, critic) in enumerate(self.series):
             if actor is None and not hasattr(actor, 'controller'): continue
             episodes = []
-            memory = self.cluster.rollout(actor, memory=memory, nepisodes=self.nepisodes, state=start_state, episodes=episodes)
+            memory = self.cluster.rollout(actor, memory=memory, nepisodes=self.nepisodes, state=start_state, episodes=episodes,
+                                          visualize=self.visualize)
             tmp=[]
             for obs0, a0, r0, done in memory.episodes(episodes):
                 q=critic.predict([obs0, a0])
@@ -101,10 +123,9 @@ class ActorCriticSeriesRollout(Callback):
             callback.on_epoch_end(epoch,logs,memory,results)
 
 class ActorCriticRollout(ActorCriticSeriesRollout):
-    def __init__(self,cluster,actor,critic,callbacks,nepisodes=1):
+    def __init__(self,cluster,actor,critic,callbacks,**kwargs):
         self.series=[('',actor,critic)]
-        super().__init__(cluster,self.series,callbacks,nepisodes=nepisodes)
-
+        super().__init__(cluster,self.series,callbacks,**kwargs)
 class PltQEval2(Callback):
     def __init__(self, env,gamma,title="", fignum=None):
         self.env=env
@@ -140,9 +161,10 @@ class PltQEval2(Callback):
             plt.plot(ar[:, 0], label=name + " reward")
             plt.legend(loc=1, fontsize='xx-small')
             if idx == 0:
-                dfr = discounted_future(r0, self.gamma, done[-1])
-                tdq = TD_q(actor, critic, self.gamma, obs1, r0, done)
-                qd=q_delta(q[:, 0], self.gamma)
+                gamma = self.gamma.gamma if hasattr(self.gamma, 'gamma') else self.gamma
+                dfr = discounted_future(r0, gamma, done[-1])
+                tdq = TD_q(actor, critic, gamma, obs1, r0, done)
+                qd=q_delta(q[:, 0], gamma)
                 self.ag1.lim([0])
                 self.ag2.lim([0])
                 self.ag3.lim([0])
@@ -215,9 +237,10 @@ class PltQEval(Callback):
             plt.plot(ar[:, 0], label=name+" policy")
             plt.legend(loc=1,fontsize='xx-small')
             if idx==0:
-                dfr = discounted_future(r0, self.gamma, done[-1])
-                tdq = TD_q(actor, critic, self.gamma, obs1, r0, done)
-                qd=q_delta(q[:, 0], self.gamma)
+                gamma = self.gamma.gamma if hasattr(self.gamma, 'gamma') else self.gamma
+                dfr = discounted_future(r0, gamma, done[-1])
+                tdq = TD_q(actor, critic, gamma, obs1, r0, done)
+                qd=q_delta(q[:, 0], gamma)
                 self.ag2.lim([0])
                 self.ag3.lim([0])
                 plt.subplot(3,1,2)
@@ -252,7 +275,7 @@ class PltObservation(Callback):
         plt.clf()
         plt.suptitle(self.title + " epoch {}".format(epoch))
 
-        for name, actor, critic, episodes, q in results:
+        for name, actor, critic, episodes, _ in results:
             for obs, act, reward, done in memory.episodes(episodes):
                 for i in range(self.nobs):
                     plt.subplot(self.nplots, 1, i+1)
@@ -274,13 +297,28 @@ class PltObservation(Callback):
         plt.pause(0.001)
 
 class SaveModel(Callback):
-    def __init__(self,actor,critic,xdir='',skip=1):
+    def __init__(self,actor,critic,xdir='',env=None,skip=1):
         self.actor=actor
         self.critic=critic
         self.xdir=xdir
         self.skip=skip
+        if env is not None:
+            import pickle
+            with open('envspec.p','wb') as f:
+                pickle.dump(env.spec, f)
     def on_epoch_end(self,epoch,logs):
         if epoch % self.skip != 0:
             return
         self.actor.save(os.path.join(self.xdir, 'actor.h5'))
         self.critic.save(os.path.join(self.xdir,'critic.h5'))
+
+class ParameterSchedule(Callback):
+    def __init__(self,agent,schedule):
+        self.agent=agent
+        self.schedule=schedule
+        self.idx=0
+    def on_epoch_end(self,epoch,logs):
+        if  epoch in self.schedule:
+            for name,value in self.schedule[epoch].items():
+                setattr(self.agent,name,value)
+
